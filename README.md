@@ -1,59 +1,75 @@
-# @thebes/sdk
+# Thebes Protocol SDK
 
-The shared developer SDK for [Thebes Protocol](https://github.com/Mercatura-Forum/Thebes-Protocol-)
-example dapps. One source of truth for the client toolkit and the Motoko backend
-library that every example used to copy into itself.
+The developer SDK and starting point for building on
+[Thebes Protocol](https://github.com/Mercatura-Forum/Thebes-Protocol-) — a
+high-throughput Layer 1 with on-chain threshold signing, passkey identity, and
+certified asset hosting.
 
-Before this package, `boundary.js` was duplicated across **10** examples (and one
-copy had already drifted to a different build), the typed `thebes.ts` layer across
-**9**, and `Admin.mo` across **9**. This repo holds each of those **once**;
-examples depend on it instead of carrying their own copy.
+This repository is two things:
 
-## What's inside
+1. **The client SDK** every Thebes application uses — a browser boundary client,
+   a typed query/update layer, React hooks, and the Memphis passkey gate.
+2. **The front door to the example library** — a growing, open catalog of
+   production-grade reference applications and the educational material that
+   explains how they work.
+
+## Example applications
+
+Each app is a complete, self-contained repository: a Motoko backend that owns the
+on-chain state and a React frontend served as certified assets. Together they
+form a teaching library — every app isolates a different pattern you will reuse
+in your own product.
+
+| Application | What it demonstrates | Repository |
+| --- | --- | --- |
+| **Store** | Catalog, carts, orders, admin surface, on-chain media | [thebes-example-store](https://github.com/Mercatura-Forum/thebes-example-store) |
+| **Chat** | Real-time rooms, members, passkey-gated profiles | [thebes-example-chat](https://github.com/Mercatura-Forum/thebes-example-chat) |
+| **CRM** | Contacts, a sales pipeline, contact media | [thebes-example-crm](https://github.com/Mercatura-Forum/thebes-example-crm) |
+| **Restaurant** | Menu, customer orders, a forward-only kitchen lifecycle | [thebes-example-restaurant](https://github.com/Mercatura-Forum/thebes-example-restaurant) |
+| **Finance** | Accounts, budgets, a dashboard, balance guards | [thebes-example-finance](https://github.com/Mercatura-Forum/thebes-example-finance) |
+| **Booking** | Listings, reservations, a double-booking guard | [thebes-example-booking](https://github.com/Mercatura-Forum/thebes-example-booking) |
+| **Loyalty** | Points, cards, transaction history | [thebes-example-loyalty](https://github.com/Mercatura-Forum/thebes-example-loyalty) |
+| **University** | Course catalog, enrollment, a registrar role | [thebes-example-university](https://github.com/Mercatura-Forum/thebes-example-university) |
+| **Cards** | Majlis — an on-chain card game (Estimation & Tarneeb) | [thebes-example-cards](https://github.com/Mercatura-Forum/thebes-example-cards) |
+
+Every example depends on this SDK and on the
+[thebes-lib](https://github.com/Mercatura-Forum/thebes-lib) Motoko library — it
+never copies them in. There is exactly one source of truth for the toolkit, and
+every app inherits improvements to it.
+
+## What's in this SDK
 
 | Path | What it is |
 | --- | --- |
 | `runtime/boundary.js` | Browser boundary client (`window.EgyptBoundary`): Candid encode/decode, persisted browser identity, call + receipt polling. |
 | `runtime/passkey.js` | Memphis passkey client (`window.MemphisPasskey`): WebAuthn sign-in → session. |
-| `src/thebes.ts` | Typed wrapper over `window.EgyptBoundary` — `query` / `update`, media upload, decoders. Framework-agnostic. |
+| `src/thebes.ts` | Typed wrapper over the boundary client — `query` / `update`, media upload, decoders. Framework-agnostic. |
 | `src/useThebes.ts` | React hooks — `useQuery`, `useUpdate`, `useMediaUpload`. |
 | `src/useMemphis.ts` | React hook — `useMemphis` (passkey session). |
 | `src/MemphisGate.tsx` | `<MemphisGate>` auth gate + `useAuth()` + `<SignOutChip>`. |
-| `motoko/src/*.mo` | Motoko backend lib — `Admin`, `MemphisAuth`, `Users`, `Pagination`. |
 
-## Install (git dependency — no registry credentials needed)
+## Use it (React + Vite)
 
-Pin a tag so builds are reproducible:
+Add the SDK as a pinned dependency — no registry account required:
 
 ```jsonc
 // package.json
-{
-  "dependencies": {
-    "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.1.0"
-  }
-}
+{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.1.1" } }
 ```
-
-`npm install` runs the package's `prepare` step, which compiles `src/` to `dist/`.
-
-### Frontend (React + Vite)
 
 ```ts
 import { MemphisGate, useAuth, useQuery, useUpdate, encodeArgs, decodeVecRecord } from '@thebes/sdk'
 ```
 
-The two browser runtimes load as plain `<script>` tags, so copy them into your
-app's `public/` (Vite serves `public/` at the web root). Add this to your build:
+The two browser runtimes load as plain `<script>` tags. Sync them into your app's
+`public/` at build time:
 
 ```jsonc
 // package.json scripts
 {
-  "scripts": {
-    "presync": "true",
-    "sync-sdk": "cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/passkey.js public/",
-    "build": "npm run sync-sdk && tsc -b && vite build",
-    "dev": "npm run sync-sdk && vite"
-  }
+  "sync-sdk": "mkdir -p public && cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/passkey.js public/",
+  "dev": "npm run sync-sdk && vite",
+  "build": "npm run sync-sdk && tsc -b && vite build"
 }
 ```
 
@@ -63,46 +79,36 @@ app's `public/` (Vite serves `public/` at the web root). Add this to your build:
 <script src="./passkey.js"></script>
 ```
 
-> Later upgrade path: when an npm `@thebes` token is provisioned, this same
-> package is published to the registry and the dependency becomes
-> `"@thebes/sdk": "^0.1.0"` — a one-line change per example, no code change.
+## The backend library
 
-### Backend (Motoko)
+The Motoko backend library — `Admin`, `MemphisAuth`, `Users`, `Pagination` —
+lives in [thebes-lib](https://github.com/Mercatura-Forum/thebes-lib) and installs
+through [mops](https://mops.one) as a git dependency:
 
-The Motoko lib lives under `motoko/` as the `thebes-lib` package. Until it is
-published to [mops](https://mops.one), consume it as a git dependency or vendor
-`motoko/src/*.mo` into your contract's `lib/` from this single source:
+```toml
+# mops.toml
+[dependencies]
+thebes-lib = "https://github.com/Mercatura-Forum/thebes-lib#v0.1.0"
+```
 
 ```motoko
-import Admin "lib/Admin";
-import Users "lib/Users";
+import Admin "mo:thebes-lib/Admin";
 ```
 
-## Verify — wire-output oracle
+## Roadmap
 
-Extracting one shared `boundary.js` is only safe if **no example's on-the-wire
-bytes change** when it switches from its vendored copy to the SDK. The oracle
-proves it: it loads the canonical build and e-commerce's drifted copy side by
-side and asserts every Candid-encoded argument and decoded reply is
-byte-identical across both.
+This library grows. On the path ahead:
 
-```
-npm run oracle
-```
+- **More reference applications** spanning additional domains and patterns.
+- **A multi-page commerce build** to join the catalog.
+- **Educational material** — guides and walkthroughs that explain each app end to
+  end, from passkey identity to threshold-signed state.
+- **Registry publishing** — `@thebes/sdk` on npm and `thebes-lib` on mops, so the
+  pinned git dependency becomes a versioned registry dependency with no code
+  change.
 
-It confirms the **only** difference between the two builds is the transport
-envelope field name (`contract_id` vs `canister_id`) — a request-shape field,
-not part of the Candid payload — so adopting the SDK changes zero wire bytes and
-normalizes e-commerce onto the current field. Any encoding divergence exits
-non-zero (a real regression).
-
-## Develop
-
-```
-npm install      # installs typescript + @types/react, runs prepare (build)
-npm run build    # tsc → dist/
-npm run oracle   # wire-equivalence proof
-```
+Contributions are welcome — each example repository carries its own
+`CONTRIBUTING` guide.
 
 ## License
 
