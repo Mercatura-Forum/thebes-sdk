@@ -1,0 +1,17 @@
+Thebes Protocol SDK
+Copyright (c) 2026 Mercatura Forum
+
+This package is the shared developer SDK for the Thebes Layer 1 example dapps.
+It bundles a browser boundary client, a Memphis passkey auth client, a typed
+React layer, and a Motoko backend library. It builds on the Internet Computer
+Canister Development Kit (IC CDK) and the Motoko core library:
+
+  • Motoko core library — © DFINITY Foundation, Apache-2.0
+                          https://github.com/dfinity/motoko-core
+  • ic-cdk / IC CDK     — © DFINITY Foundation, Apache-2.0
+                          https://github.com/dfinity/cdk-rs
+
+Licensed under the Apache License, Version 2.0. You may obtain a copy of the
+License at http://www.apache.org/licenses/LICENSE-2.0
+
+Authored by the Thebes Protocol contributors.

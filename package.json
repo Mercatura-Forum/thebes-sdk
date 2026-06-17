@@ -1,0 +1,53 @@
+{
+  "name": "@thebes/sdk",
+  "version": "0.1.0",
+  "description": "Thebes Protocol SDK — boundary client, typed React hooks, Memphis passkey auth, and (under ./motoko) the Motoko backend lib. Single source of truth shared by the Thebes example dapps.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Thebes Protocol contributors",
+  "homepage": "https://github.com/Mercatura-Forum/thebes-sdk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mercatura-Forum/thebes-sdk.git"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./thebes": {
+      "types": "./dist/thebes.d.ts",
+      "import": "./dist/thebes.js"
+    },
+    "./boundary.js": "./runtime/boundary.js",
+    "./passkey.js": "./runtime/passkey.js",
+    "./runtime/*": "./runtime/*"
+  },
+  "files": [
+    "dist",
+    "runtime",
+    "src",
+    "README.md",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "oracle": "node oracle/encode-diff.mjs",
+    "test": "node oracle/encode-diff.mjs"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "typescript": "~5.7.0"
+  }
+}
