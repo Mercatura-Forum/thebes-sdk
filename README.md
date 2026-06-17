@@ -110,6 +110,15 @@ This library grows. On the path ahead:
 Contributions are welcome — each example repository carries its own
 `CONTRIBUTING` guide.
 
+## Acknowledgements
+
+Thebes stands on the shoulders of the [Internet Computer](https://internetcomputer.org)
+and the [DFINITY Foundation](https://dfinity.org). Their **canister model** — smart
+contracts as orthogonally-persistent actors, with the Motoko language built around
+it — is genuinely excellent work, and it directly inspired the design of this
+stack. We are grateful to the DFINITY team and the wider IC community for showing
+what a smart-contract platform can be.
+
 ## License
 
 Apache-2.0. See [`NOTICE`](./NOTICE). Authored by the Thebes Protocol contributors.
