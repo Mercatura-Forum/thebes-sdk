@@ -466,7 +466,7 @@
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-                contract_id: MEMPHIS_CID,
+                canister_id: MEMPHIS_CID,
                 method,
                 arg: argHex,
                 sender,

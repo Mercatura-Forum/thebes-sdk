@@ -1,6 +1,6 @@
 {
   "name": "@thebes/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thebes Protocol SDK — boundary client, typed React hooks, Memphis passkey auth, and (under ./motoko) the Motoko backend lib. Single source of truth shared by the Thebes example dapps.",
   "type": "module",
   "license": "Apache-2.0",
