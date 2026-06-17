@@ -32,6 +32,7 @@ in your own product.
 | **University** | Course catalog, enrollment, a registrar role | [thebes-example-university](https://github.com/Mercatura-Forum/thebes-example-university) |
 | **Cards** | Majlis — an on-chain card game (Estimation & Tarneeb) | [thebes-example-cards](https://github.com/Mercatura-Forum/thebes-example-cards) |
 | **Invoicing** | Invoices with an on-chain-recomputed total and a guarded lifecycle (also embedded in Store & Restaurant) | [thebes-example-invoicing](https://github.com/Mercatura-Forum/thebes-example-invoicing) |
+| **Medical imaging** | Lumen — X-ray studies with images in the media contract, clinical RBAC, and an immutable access log | [thebes-example-xray](https://github.com/Mercatura-Forum/thebes-example-xray) |
 
 Every example depends on this SDK and on the
 [thebes-lib](https://github.com/Mercatura-Forum/thebes-lib) Motoko library — it
