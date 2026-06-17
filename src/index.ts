@@ -12,7 +12,7 @@
  * into its `public/` and loads them with <script> tags (see the README). This
  * barrel only re-exports the TypeScript layer.
  */
-export * from './thebes'
-export * from './useThebes'
-export * from './useMemphis'
-export * from './MemphisGate'
+export * from './thebes.js'
+export * from './useThebes.js'
+export * from './useMemphis.js'
+export * from './MemphisGate.js'

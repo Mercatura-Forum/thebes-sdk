@@ -12,7 +12,7 @@
  * differ, so the gate always looks native to its host app.
  */
 import { createContext, useContext, useState, type ReactNode } from 'react'
-import { useMemphis, type MemphisAuth } from './useMemphis'
+import { useMemphis, type MemphisAuth } from './useMemphis.js'
 
 const AuthCtx = createContext<MemphisAuth | null>(null)
 

@@ -16,7 +16,7 @@ import {
   downscaleImage,
   type MediaClass,
   type FinishReply,
-} from './thebes'
+} from './thebes.js'
 
 export interface QueryState<T> {
   data: T | undefined
