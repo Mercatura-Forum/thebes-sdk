@@ -33,11 +33,14 @@ in your own product.
 | **Cards** | Majlis — an on-chain card game (Estimation & Tarneeb) | [thebes-example-cards](https://github.com/Mercatura-Forum/thebes-example-cards) |
 | **Invoicing** | Invoices with an on-chain-recomputed total and a guarded lifecycle (also embedded in Store & Restaurant) | [thebes-example-invoicing](https://github.com/Mercatura-Forum/thebes-example-invoicing) |
 | **Medical imaging** | Lumen — X-ray studies with images in the media contract, clinical RBAC, and an immutable access log | [thebes-example-xray](https://github.com/Mercatura-Forum/thebes-example-xray) |
+| **Open banking (ISO 20022)** | Message validation + audit hub for the ISO 20022 payment standard — backend contract, no web frontend | [thebes-example-open-banking-iso20022](https://github.com/Mercatura-Forum/thebes-example-open-banking-iso20022) |
 
-Every example depends on this SDK and on the
-[thebes-lib](https://github.com/Mercatura-Forum/thebes-lib) Motoko library — it
-never copies them in. There is exactly one source of truth for the toolkit, and
-every app inherits improvements to it.
+Every example builds on this SDK and on the
+[thebes-lib](https://github.com/Mercatura-Forum/thebes-lib) Motoko library. Each
+example repository vendors a snapshot of both (under `frontend/vendor/@thebes/sdk`
+and `motoko/thebes-lib`) so it builds self-contained; this repository and
+`thebes-lib` remain the single upstream source of truth from which those
+snapshots are refreshed.
 
 ## What's in this SDK
 
