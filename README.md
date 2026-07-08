@@ -23,16 +23,16 @@ in your own product.
 | Application | What it demonstrates | Repository |
 | --- | --- | --- |
 | **Store** | Catalog, carts, orders, admin surface, on-chain media | [thebes-example-store](https://github.com/Mercatura-Forum/thebes-example-store) |
-| **Chat** | Real-time rooms, members, passkey-gated profiles | [thebes-example-chat](https://github.com/Mercatura-Forum/thebes-example-chat) |
-| **CRM** | Contacts, a sales pipeline, contact media | [thebes-example-crm](https://github.com/Mercatura-Forum/thebes-example-crm) |
+| **Chat** | Multi-room salon — reactions, tombstones, an on-chain cooldown, a conversation oracle | [thebes-example-chat](https://github.com/Mercatura-Forum/thebes-example-chat) |
+| **CRM** | Contacts, a pipeline with append-only stage trails, a weighted forecast | [thebes-example-crm](https://github.com/Mercatura-Forum/thebes-example-crm) |
 | **Restaurant** | Menu, customer orders, a forward-only kitchen lifecycle | [thebes-example-restaurant](https://github.com/Mercatura-Forum/thebes-example-restaurant) |
-| **Finance** | Accounts, budgets, a dashboard, balance guards | [thebes-example-finance](https://github.com/Mercatura-Forum/thebes-example-finance) |
-| **Booking** | Listings, reservations, a double-booking guard | [thebes-example-booking](https://github.com/Mercatura-Forum/thebes-example-booking) |
-| **Loyalty** | Points, cards, transaction history | [thebes-example-loyalty](https://github.com/Mercatura-Forum/thebes-example-loyalty) |
-| **University** | Course catalog, enrollment, a registrar role | [thebes-example-university](https://github.com/Mercatura-Forum/thebes-example-university) |
+| **Finance** | Accounts, double-entry transfers, budgets, a global conservation seal | [thebes-example-finance](https://github.com/Mercatura-Forum/thebes-example-finance) |
+| **Booking** | Seated slots, waitlists, deposit escrow, a capacity + conservation oracle | [thebes-example-booking](https://github.com/Mercatura-Forum/thebes-example-booking) |
+| **Loyalty** | Points with tier multipliers, stocked rewards, a circulation seal | [thebes-example-loyalty](https://github.com/Mercatura-Forum/thebes-example-loyalty) |
+| **University** | Prerequisite DAG, waitlists, append-only transcripts, on-chain GPA | [thebes-example-university](https://github.com/Mercatura-Forum/thebes-example-university) |
 | **Cards** | Majlis — an on-chain card game (Estimation & Tarneeb) | [thebes-example-cards](https://github.com/Mercatura-Forum/thebes-example-cards) |
-| **Invoicing** | Invoices with an on-chain-recomputed total and a guarded lifecycle (also embedded in Store & Restaurant) | [thebes-example-invoicing](https://github.com/Mercatura-Forum/thebes-example-invoicing) |
-| **Medical imaging** | Lumen — X-ray studies with images in the media contract, clinical RBAC, and an immutable access log | [thebes-example-xray](https://github.com/Mercatura-Forum/thebes-example-xray) |
+| **Invoicing** | Invoices with on-chain totals and exact settlement — partial payments that can never overshoot (also embedded in Store & Restaurant) | [thebes-example-invoicing](https://github.com/Mercatura-Forum/thebes-example-invoicing) |
+| **Medical imaging** | Lumen — X-ray studies with images in the media contract, clinical RBAC, and a gap-free, oracle-checked access log | [thebes-example-xray](https://github.com/Mercatura-Forum/thebes-example-xray) |
 | **Open banking (ISO 20022)** | Message validation + audit hub for the ISO 20022 payment standard — backend contract, no web frontend | [thebes-example-open-banking-iso20022](https://github.com/Mercatura-Forum/thebes-example-open-banking-iso20022) |
 
 Every example builds on this SDK and on the
