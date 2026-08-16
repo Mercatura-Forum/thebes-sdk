@@ -46,6 +46,99 @@ function boundary(): Boundary {
   return b
 }
 
+// ── Failure-aware calls ──
+//
+// boundary.js reports exactly three failure shapes, and they differ in the one
+// way that matters: whether the chain may have ACCEPTED the message.
+//
+//   • `call: no message_hash`   — the submit itself failed (the gateway refused
+//     — e.g. an HTTP 503 while the cluster is degraded, a 429, or the network
+//     dropped). No message hash was ever issued, so nothing was accepted and
+//     resubmitting is safe.
+//   • `call rejected: <detail>` — the boundary or the contract said no. The
+//     answer is deterministic; retrying re-asks the same question.
+//   • `receipt poll timed out`  — the message WAS accepted (a hash was issued)
+//     and finalization simply outran the polling window. The update may still
+//     land. Resubmitting here is how an app double-writes, so we never do it —
+//     re-read state (or extend `timeoutMs`) instead.
+//
+// The rules below encode that split so every app gets it for free: refused
+// submits retry with the SAME nonce and exponential backoff; rejections and
+// receipt timeouts surface as typed errors an app can branch on.
+
+export type CallFailureKind =
+  | 'refused' // submit yielded no message hash — never accepted, safe to retry
+  | 'rejected' // the boundary or contract said no — deterministic, do not retry
+  | 'receipt-timeout' // accepted but not yet finalized — re-read state, never resubmit
+  | 'network' // a query's transport failed — idempotent, safe to retry
+
+export class ThebesCallError extends Error {
+  readonly kind: CallFailureKind
+  /** Whether an automatic retry of the SAME call is safe. */
+  readonly retryable: boolean
+  /** How many attempts were made before giving up. */
+  readonly attempts: number
+  /** The boundary's own detail string, when it gave one. */
+  readonly detail?: string
+
+  constructor(kind: CallFailureKind, message: string, attempts: number, detail?: string) {
+    super(message)
+    this.name = 'ThebesCallError'
+    this.kind = kind
+    this.retryable = kind === 'refused' || kind === 'network'
+    this.attempts = attempts
+    this.detail = detail
+  }
+}
+
+/** Classify one boundary.js failure by the shape it actually throws. */
+function classifyUpdateFailure(e: unknown): { kind: CallFailureKind; detail?: string } {
+  const msg = e instanceof Error ? e.message : String(e)
+  if (msg === 'call: no message_hash') return { kind: 'refused' }
+  if (msg === 'receipt poll timed out') return { kind: 'receipt-timeout' }
+  if (msg.startsWith('call rejected: ')) {
+    return { kind: 'rejected', detail: msg.slice('call rejected: '.length) }
+  }
+  return { kind: 'rejected', detail: msg }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms))
+}
+
+/** Exponential backoff with jitter, so retries under degradation spread out
+ *  instead of arriving as a thundering herd the moment quorum returns. */
+function backoffDelay(baseMs: number, attempt: number): number {
+  return baseMs * 2 ** attempt + Math.random() * baseMs
+}
+
+export interface UpdateOpts {
+  /** Override the persisted browser identity for this call. */
+  sender?: string
+  /** Fix the message nonce. Defaults once per LOGICAL call and is reused across
+   *  submit retries, so the chain sees one message however many times the
+   *  gateway refused the door. */
+  nonce?: number
+  /** Receipt-polling window, forwarded to boundary.js (its default is 10s).
+   *  Size it to the work: a call that legitimately finalizes slowly deserves a
+   *  longer window, not a resubmit. */
+  timeoutMs?: number
+  /** Extra attempts after a REFUSED submit (default 2). Refusals are the only
+   *  update failure that retries — see the failure-shape notes above. */
+  retries?: number
+  /** Backoff base in ms (default 400). */
+  backoffMs?: number
+}
+
+export interface QueryOpts {
+  sender?: string
+  /** Extra attempts after a transport failure (default 2). Queries are
+   *  idempotent by construction, so this is unconditionally safe. */
+  retries?: number
+  /** Backoff base in ms (default 250). */
+  backoffMs?: number
+}
+
 /** Stable per-browser identity (28-byte sender persisted in localStorage). */
 export function identity(): string {
   return boundary().identity()
@@ -67,14 +160,84 @@ export function encodeArgs(values: unknown[]): string {
   return b.bytesToHex(b.encodeArgs(values))
 }
 
-export function query(cid: number, method: string, argHex?: string) {
-  return boundary().callQuery(cid, method, argHex ?? boundary().EMPTY_ARGS_HEX)
+/**
+ * Read a contract query. Idempotent, so transport failures retry with backoff.
+ *
+ * boundary.js swallows a failed fetch into an EMPTY reply object — without this
+ * layer, a degraded cluster hands the app `{}`, the hook reads `reply_hex ?? ''`
+ * and the decoder runs on an empty string. A read that failed must be an ERROR
+ * the app can see, never garbage it can render.
+ */
+export async function query(cid: number, method: string, argHex?: string, opts?: QueryOpts) {
+  const retries = opts?.retries ?? 2
+  const backoffMs = opts?.backoffMs ?? 250
+  let attempts = 0
+  for (;;) {
+    attempts++
+    const r = await boundary().callQuery(cid, method, argHex ?? boundary().EMPTY_ARGS_HEX, {
+      sender: opts?.sender,
+    })
+    if (r.error) throw new ThebesCallError('rejected', `query rejected: ${r.error}`, attempts, r.error)
+    if (r.reply_hex !== undefined || r.reply !== undefined) return r
+    // No reply and no error — boundary.js's shape for "the fetch itself failed".
+    if (attempts > retries) {
+      throw new ThebesCallError(
+        'network',
+        `query ${method} got no reply from the boundary after ${attempts} attempt(s)`,
+        attempts,
+      )
+    }
+    await sleep(backoffDelay(backoffMs, attempts - 1))
+  }
 }
 
-export async function update(cid: number, method: string, argHex?: string) {
-  const r = await boundary().callUpdate(cid, method, argHex ?? boundary().EMPTY_ARGS_HEX)
-  if (r.status === 'error') throw new Error(r.error || 'call rejected')
-  return r
+/**
+ * Run an update call. Retries ONLY the refused-submit case (no message hash was
+ * issued, so nothing was accepted), reusing the same nonce across attempts; a
+ * rejection is deterministic and a receipt timeout may already have landed, so
+ * neither ever auto-retries. Both surface as `ThebesCallError` with a `kind`
+ * the app can branch on.
+ */
+export async function update(cid: number, method: string, argHex?: string, opts?: UpdateOpts) {
+  const retries = opts?.retries ?? 2
+  const backoffMs = opts?.backoffMs ?? 400
+  // One nonce per LOGICAL call, fixed before the first attempt: however many
+  // times the gateway refuses the door, the chain sees a single message.
+  const nonce = opts?.nonce ?? Date.now() * 1000 + Math.floor(Math.random() * 1024)
+  let attempts = 0
+  for (;;) {
+    attempts++
+    try {
+      const r = await boundary().callUpdate(cid, method, argHex ?? boundary().EMPTY_ARGS_HEX, {
+        sender: opts?.sender,
+        nonce,
+        timeoutMs: opts?.timeoutMs,
+      })
+      if (r.status === 'error') {
+        throw new ThebesCallError(
+          'rejected',
+          `update ${method} rejected: ${r.error || 'call rejected'}`,
+          attempts,
+          r.error,
+        )
+      }
+      return r
+    } catch (e: unknown) {
+      if (e instanceof ThebesCallError) throw e
+      const { kind, detail } = classifyUpdateFailure(e)
+      if (kind === 'refused' && attempts <= retries) {
+        await sleep(backoffDelay(backoffMs, attempts - 1))
+        continue
+      }
+      const why =
+        kind === 'refused'
+          ? `submit refused after ${attempts} attempt(s) — the gateway accepted nothing`
+          : kind === 'receipt-timeout'
+            ? 'accepted but not finalized within the polling window — re-read state before retrying, or pass a longer timeoutMs'
+            : `rejected: ${detail}`
+      throw new ThebesCallError(kind, `update ${method} ${why}`, attempts, detail)
+    }
+  }
 }
 
 // Re-export the decoders so app code can shape replies.

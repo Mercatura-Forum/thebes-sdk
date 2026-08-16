@@ -84,6 +84,42 @@ The two browser runtimes load as plain `<script>` tags. Sync them into your app'
 <script src="./passkey.js"></script>
 ```
 
+## Failure handling
+
+The boundary reports exactly three failure shapes, and they split on the one
+question that decides whether a retry is safe: **was a message hash issued?**
+
+| What happened | `ThebesCallError.kind` | Retried by the SDK? |
+| --- | --- | --- |
+| The submit was refused (cluster degraded, rate-limited, network drop) — no message hash was issued, so nothing was accepted | `refused` | Yes — same nonce, exponential backoff |
+| The boundary or the contract said no — the answer is deterministic | `rejected` | Never |
+| The message was accepted but did not finalize inside the polling window — it may still land | `receipt-timeout` | Never — re-read state, or pass a longer `timeoutMs` |
+| A query's transport failed — reads are idempotent | `network` | Yes — backoff |
+
+`update` fixes one nonce per logical call and reuses it across submit retries, so
+the chain sees a single message however many times the gateway refused the door.
+A receipt timeout is the one case an app must not blindly retry — the update may
+have landed; re-read your state first. Queries that fail no longer come back as
+an empty reply for your decoder to chew on: they throw, so the failure is
+visible.
+
+```ts
+import { update, ThebesCallError } from '@thebes/sdk'
+
+try {
+  await update(cid, 'place_order', argHex, { timeoutMs: 30_000 })
+} catch (e) {
+  if (e instanceof ThebesCallError && e.kind === 'receipt-timeout') {
+    await refetchOrders() // it may have landed — read before retrying
+  }
+}
+```
+
+Defaults: 2 retries, 400 ms backoff base for updates (250 ms for queries), and
+the runtime's own 10 s receipt window — all tunable per call via the options
+argument. The failure semantics are pinned by `oracle/faults.mjs`, which drives
+the typed layer against every shape the boundary client actually throws.
+
 ## The backend library
 
 The Motoko backend library — `Admin`, `MemphisAuth`, `Users`, `Pagination` —
