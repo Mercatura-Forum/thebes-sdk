@@ -4,7 +4,7 @@
  * Talks to:
  *   POST /api/call                    (boundary passthrough → validator /api/call)
  *   GET  /api/receipt?hash=<hex>      (boundary passthrough → validator /api/receipt)
- *   POST /api/v1/contract/921/query   (boundary query passthrough)
+ *   POST /api/v1/canister/921/query   (boundary query passthrough)
  *
  * Surface exposed at window.MemphisPasskey:
  *   register(name)               -> { name, anchor_id_hex, session_token_hex, expires_at_ns, display_tag }
@@ -507,14 +507,23 @@
     }
     async function memphisQuery(method, argBytes) {
         const argB64 = bytesToBase64(argBytes);
-        const res = await fetch(BOUNDARY + "/api/v1/contract/" + MEMPHIS_CID + "/query", {
+        const res = await fetch(BOUNDARY + "/api/v1/canister/" + MEMPHIS_CID + "/query", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ method, arg: argB64, sender: "" }),
-        }).then(r => r.json());
+        }).then(async (r) => {
+            // An error response can carry an empty body, and JSON.parse on
+            // one throws a message that names neither the request nor the
+            // status. Surface both instead.
+            const body = await r.text();
+            if (!body) {
+                throw new Error("Memphis query '" + method + "' returned an empty response (HTTP " + r.status + ")");
+            }
+            return JSON.parse(body);
+        });
         if (res.status !== "success") throw new Error("query: " + (res.error || res.status));
         if (!res.reply) throw new Error("query: empty reply");
-        // /api/v1/contract/{cid}/query returns reply as base64; /api/receipt
+        // /api/v1/canister/{cid}/query returns reply as base64; /api/receipt
         // (used by memphisCallAwait below) returns it as hex.
         return base64ToBytes(res.reply);
     }
