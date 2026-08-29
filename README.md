@@ -1,7 +1,7 @@
 # Thebes Protocol SDK
 
 The developer SDK and starting point for building on
-[Thebes Protocol](https://github.com/Mercatura-Forum/Thebes-Protocol-) — a
+[Thebes Protocol](https://thebesprotocol.com) — a
 high-throughput Layer 1 with on-chain threshold signing, passkey identity, and
 certified asset hosting.
 
