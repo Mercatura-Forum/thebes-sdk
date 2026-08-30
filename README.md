@@ -52,7 +52,8 @@ snapshots are refreshed.
 | `src/thebes.ts` | Typed wrapper over the boundary client — `query` / `update`, media upload, decoders. Framework-agnostic. |
 | `src/useThebes.ts` | React hooks — `useQuery`, `useUpdate`, `useMediaUpload`. |
 | `src/useMemphis.ts` | React hook — `useMemphis` (passkey session, Memphis origin only). |
-| `src/useMemphisConnect.ts` | React hook — `useMemphisConnect(app)` for an app on its own domain. |
+| `src/session.ts` | **Framework-free** session API — `getSession` / `signIn` / `signOut` / `resumeFromRedirect` / `onSessionChange`. Use it from a static page, Vue, Svelte, or a script tag. |
+| `src/useMemphisConnect.ts` | React hook — `useMemphisConnect(app)`, a thin face over `session.ts`. |
 | `src/MemphisGate.tsx` | `<MemphisGate>` auth gate + `useAuth()` + `<SignOutChip>` (Memphis origin only). |
 | `src/MemphisConnectGate.tsx` | `<MemphisConnectGate app>` + `useConnectAuth()` + `<ConnectChip>` for an app on its own domain. |
 
@@ -76,6 +77,16 @@ domain.
 | the Memphis origin | `useMemphis` | `passkey.js` |
 | **its own domain** | `<MemphisConnectGate app>` / `useMemphisConnect(app)` | `memphis-connect.js` |
 
+Not on React? **`session.ts`** is the same thing without it, and it is what the
+hook is built on, so both get identical behaviour:
+
+```ts
+import { getSession, signIn, resumeFromRedirect } from '@thebes/sdk/session'
+
+const held = resumeFromRedirect() ?? getSession('My App')
+button.onclick = () => signIn('My App')   // from a gesture, never after an await
+```
+
 `useMemphisConnect` opens the ceremony in a window at the Memphis origin, which
 attenuates the master session into a token minted for *your* origin and hands
 back only that. Your app never sees a master token, and no allowlisting is
@@ -87,7 +98,7 @@ Add the SDK as a pinned dependency — no registry account required:
 
 ```jsonc
 // package.json
-{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.2.0" } }
+{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.3.0" } }
 ```
 
 ```ts

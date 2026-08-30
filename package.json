@@ -1,6 +1,6 @@
 {
   "name": "@thebes/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Thebes Protocol SDK \u2014 boundary client, typed React hooks, Memphis passkey auth, and (under ./motoko) the Motoko backend lib. Single source of truth shared by the Thebes example dapps.",
   "type": "module",
   "license": "Apache-2.0",
@@ -24,7 +24,11 @@
     "./boundary.js": "./runtime/boundary.js",
     "./passkey.js": "./runtime/passkey.js",
     "./runtime/*": "./runtime/*",
-    "./memphis-connect.js": "./runtime/memphis-connect.js"
+    "./memphis-connect.js": "./runtime/memphis-connect.js",
+    "./session": {
+      "types": "./dist/session.d.ts",
+      "import": "./dist/session.js"
+    }
   },
   "files": [
     "dist",

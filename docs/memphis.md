@@ -203,6 +203,40 @@ a redirect outside one is a navigation the person did not ask for. Do not `await
 anything before it — an await ends the gesture, and this is the single most common
 way a working implementation stops working on iPhone.
 
+### Holding the session, on any stack
+
+`session.ts` is the shared bookkeeping, and every Thebes site should hold its
+session through it rather than reaching into `window.memphis`:
+
+```ts
+import { getSession, signIn, signOut, resumeFromRedirect, onSessionChange } from '@thebes/sdk/session'
+```
+
+It enforces four rules that are each a bug we actually shipped:
+
+- **One session per origin**, keyed by origin and app name. Thebes Hosting kept
+  one per page: `signup.html` held the token in a local variable and never wrote
+  it down, so people finished the three-factor ceremony and arrived at the panel
+  signed out. `panel.html` and `admin.html` each kept their own copy under the
+  same key while connecting under *different* app names, so each sign-in logged
+  the other out.
+- **The expiry travels with the token.** Without it, a dead session is only
+  discovered by making a call and watching it fail — indistinguishable from the
+  network being down, which is why it presented as "it just sends me back to
+  sign in".
+- **A redirect return is collected first**, and the fragment stripped, so a
+  token is never left in the address bar.
+- **Sign-out is local.** It forgets the token this site holds. It does not end
+  the person's Memphis session — `end_session` is caller-scoped, so only the
+  Memphis origin can, which is the correct boundary.
+
+`onSessionChange(app, cb)` fires when another tab signs in or out, so a tab does
+not carry on holding a token that has been forgotten elsewhere.
+
+Adopting it on a site that already has sessions? Pass `LegacySessionKey`
+entries and the old records are read once and carried over — otherwise shipping
+the shared store is itself an outage for everyone currently signed in.
+
 ### The security property, and how to not break it
 
 A page may **lie** about its origin in the request. It gains nothing, because the

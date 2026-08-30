@@ -9,8 +9,12 @@
  *
  * This hook is the way across that wall. The ceremony happens in a window at the
  * Memphis origin, which attenuates the master session into a token minted for
- * YOUR origin and hands back only that. Use this hook whenever your app is not
- * served from the Memphis origin — which is every app with a domain of its own.
+ * YOUR origin and hands back only that. Use it whenever your app is not served
+ * from the Memphis origin — which is every app with a domain of its own.
+ *
+ * It is a thin React face over `session.ts`. All the bookkeeping — one session
+ * per origin, expiry handling, redirect collection, legacy adoption — lives
+ * there so a non-React site gets exactly the same behaviour.
  *
  * The returned `token` is an ORIGIN-SCOPED session token. Pass it to your
  * contract as a call argument; your contract passes its own audience alongside
@@ -21,51 +25,11 @@
  * Requires `memphis-connect.js` loaded as a <script> tag (see the README).
  */
 import { useCallback, useEffect, useState } from 'react'
-
-export interface ConnectSession {
-  /** The app name this credential was minted for. */
-  app: string
-  /** The person's Memphis handle. */
-  name: string
-  /** 32-byte anchor_id_hash, hex. Never the raw anchor. */
-  anchorId: string
-  /** The origin-scoped session token, hex. This is what your contract verifies. */
-  token: string
-  /** The web origin this token is valid at, and only at. */
-  origin: string
-  /** Local upper bound on validity. The contract remains the authority. */
-  expiresAtMs: number
-}
-
-export interface ConnectOptions {
-  /** "popup" (default), "redirect", or "auto" to fall back when blocked. */
-  mode?: 'popup' | 'redirect' | 'auto'
-  /** Prefill for the handle field. Authorises nothing. */
-  handle?: string
-  /** Redirect mode only. Must be on this app's own origin. */
-  returnTo?: string
-  /** Override the Memphis connect page (tests, staging). */
-  connectUrl?: string
-  /** Popup mode only. Default 120000. */
-  timeoutMs?: number
-  /** Pass false to force a fresh ceremony even if a live token is held. */
-  reuse?: boolean
-}
-
-type Connect = {
-  connect: (opts: ConnectOptions & { app: string }) => Promise<ConnectSession>
-  resume: () => ConnectSession | null
-  loadSession: (app: string) => ConnectSession | null
-  signOut: (app: string) => void
-}
-
-function mc(): Connect {
-  const m = (window as unknown as { memphis?: Connect }).memphis
-  if (!m || typeof m.connect !== 'function') {
-    throw new Error('memphis-connect.js not loaded (window.memphis missing)')
-  }
-  return m
-}
+import {
+  getSession, signIn as doSignIn, signOut as doSignOut,
+  resumeFromRedirect, onSessionChange,
+  type ConnectSession, type ConnectOptions, type LegacySessionKey,
+} from './session.js'
 
 export interface MemphisConnectAuth {
   session: ConnectSession | null
@@ -81,28 +45,38 @@ export interface MemphisConnectAuth {
 }
 
 /**
- * @param app  The name shown to the person in the connect window, and the key
- *             this app's session is stored under. Keep it stable.
+ * @param app     The name shown to the person in the connect window, and the key
+ *                this app's session is stored under. Keep it stable across
+ *                releases or people are silently signed out.
+ * @param legacy  Storage keys this site used before adopting the SDK. Read once
+ *                and adopted, so shipping this does not log out everyone who was
+ *                already signed in.
  */
-export function useMemphisConnect(app: string): MemphisConnectAuth {
+export function useMemphisConnect(app: string, legacy: LegacySessionKey[] = []): MemphisConnectAuth {
   const [session, setSession] = useState<ConnectSession | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
 
   useEffect(() => {
-    try {
-      // Order matters. A redirect-mode return arrives in the URL fragment and
-      // must be consumed on this load — `resume` also strips the fragment, so a
-      // token is never left in the address bar. Only if there is nothing to
-      // collect do we fall back to a session held from an earlier visit.
-      setSession(mc().resume() ?? mc().loadSession(app))
-    } catch { /* memphis-connect.js not present yet */ }
+    // Order matters. A redirect-mode return arrives in the URL fragment and must
+    // be consumed on this load — resumeFromRedirect also strips the fragment, so
+    // a token is never left in the address bar. Only if there is nothing to
+    // collect do we fall back to a session held from an earlier visit.
+    try { setSession(resumeFromRedirect() ?? getSession(app, legacy)) }
+    catch { /* memphis-connect.js not present yet */ }
+
+    // Another tab signing out should not leave this one holding a token it has
+    // forgotten, and another tab signing in should fill this one in.
+    return onSessionChange(app, setSession)
+    // `legacy` is a config array, not state; re-running on a new array identity
+    // would re-adopt on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [app])
 
   const signIn = useCallback(async (opts?: ConnectOptions) => {
     setBusy(true); setError(undefined)
     try {
-      setSession(await mc().connect({ ...(opts || {}), app }))
+      setSession(await doSignIn(app, opts))
     } catch (e) {
       const code = (e as { code?: string } | null)?.code
       // A cancellation is a decision, not a fault. Reporting it as an error
@@ -114,11 +88,9 @@ export function useMemphisConnect(app: string): MemphisConnectAuth {
   }, [app])
 
   const signOut = useCallback(() => {
-    // Local only: this app forgets the person. It does not end their Memphis
-    // session, which this app cannot do and should not be able to — end_session
-    // is caller-scoped on Memphis.
-    try { mc().signOut(app) } catch { /* nothing held */ }
+    doSignOut(app, legacy)
     setSession(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [app])
 
   return {

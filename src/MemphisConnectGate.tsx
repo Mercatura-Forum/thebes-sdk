@@ -23,7 +23,8 @@
  * the per-app `--color-accent` token tunes the chip to its host app.
  */
 import { createContext, useContext, type ReactNode } from 'react'
-import { useMemphisConnect, type MemphisConnectAuth, type ConnectOptions } from './useMemphisConnect.js'
+import { useMemphisConnect, type MemphisConnectAuth } from './useMemphisConnect.js'
+import type { ConnectOptions } from './session.js'
 
 const ConnectCtx = createContext<MemphisConnectAuth | null>(null)
 
