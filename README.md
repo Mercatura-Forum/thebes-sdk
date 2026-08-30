@@ -53,6 +53,16 @@ snapshots are refreshed.
 | `src/useMemphis.ts` | React hook — `useMemphis` (passkey session). |
 | `src/MemphisGate.tsx` | `<MemphisGate>` auth gate + `useAuth()` + `<SignOutChip>`. |
 
+## Identity
+
+Read **[`docs/memphis.md`](./docs/memphis.md)** before wiring authentication. It
+is the canonical guide to both halves of the Memphis integration — the browser
+passkey ceremony and the backend `MemphisAuth` gate — and it carries the rules
+that are not style preferences: `await*` rather than `await`, the `_u` bindings
+rather than the `query` ones, the `origin`/`audience` split, discoverable
+credentials, and confirm-before-mint. Each one is written down because getting it
+wrong produced a bug that did not look like an auth bug.
+
 ## Use it (React + Vite)
 
 Add the SDK as a pinned dependency — no registry account required:
@@ -93,12 +103,17 @@ through [mops](https://mops.one) as a git dependency:
 ```toml
 # mops.toml
 [dependencies]
-thebes-lib = "https://github.com/Mercatura-Forum/thebes-lib#v0.1.0"
+thebes-lib = "https://github.com/Mercatura-Forum/thebes-lib#v1.0.0"
 ```
 
 ```motoko
 import Admin "mo:thebes-lib/Admin";
 ```
+
+> Pin `v1.0.0` or later. `v0.4.0` and earlier predate origin-scoped sessions:
+> `MemphisAuth.verify` resolved a token at *any* origin, so a token your app was
+> handed authenticated as that user at every other Thebes app. See
+> [`docs/memphis.md`](./docs/memphis.md).
 
 ## Roadmap
 
