@@ -1,7 +1,12 @@
 /*
  * memphis-connect.js — sign a user in from an app on ITS OWN domain.
  *
- *     <script src="./memphis-connect.js"></script>
+ *     <script src="./memphis-connect.js"><\/script>
+ *
+ * (the backslash is deliberate: a literal closing script tag in this file
+ * terminates the block when the file is INLINED into a page, which is how
+ * the connect e2e harness loads it, and the rest of the module then parses
+ * as HTML text)
  *
  *     const who = await memphis.connect({ app: "My App" });
  *     // who.token is an ORIGIN-SCOPED session token. Pass it to your contract.
