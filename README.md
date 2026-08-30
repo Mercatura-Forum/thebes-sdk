@@ -87,7 +87,7 @@ Add the SDK as a pinned dependency — no registry account required:
 
 ```jsonc
 // package.json
-{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.1.1" } }
+{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.2.0" } }
 ```
 
 ```ts
