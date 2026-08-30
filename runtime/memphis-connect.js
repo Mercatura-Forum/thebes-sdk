@@ -72,19 +72,97 @@
     try { global.localStorage.setItem(storeKey(app), JSON.stringify(who)); } catch (_) {}
   }
 
-  /** The stored session for `app`, or null if absent, unparseable or expired. */
-  function loadSession(app) {
+  /**
+   * The stored record for `app`, expired or not, or null if absent/unparseable.
+   *
+   * Separate from `loadSession` because an EXPIRED access token is exactly when
+   * the refresh credential matters most: gating this read on the access expiry
+   * would throw away the one thing that can get the person back in without a
+   * passkey ceremony.
+   */
+  function readStored(app) {
     if (!app) return null;
     var raw;
     try { raw = global.localStorage.getItem(storeKey(app)); } catch (_) { return null; }
     if (!raw) return null;
-    var who;
-    try { who = JSON.parse(raw); } catch (_) { clearSession(app); return null; }
-    if (!who || !who.token || !who.expiresAtMs || who.expiresAtMs <= nowMs()) {
-      clearSession(app);
+    try {
+      var who = JSON.parse(raw);
+      return who && who.token ? who : null;
+    } catch (_) { clearSession(app); return null; }
+  }
+
+  /** True while the refresh credential can still be exchanged. */
+  function canRenew(who) {
+    if (!who || !who.refreshToken) return false;
+    var t = nowMs();
+    if (who.refreshExpiresAtMs && who.refreshExpiresAtMs <= t) return false;
+    if (who.refreshAbsoluteExpiresAtMs && who.refreshAbsoluteExpiresAtMs <= t) return false;
+    return true;
+  }
+
+  /** The stored session for `app`, or null if absent, unparseable or expired. */
+  function loadSession(app) {
+    var who = readStored(app);
+    if (!who) return null;
+    if (!who.expiresAtMs || who.expiresAtMs <= nowMs()) {
+      // Keep the record when it still carries a usable refresh credential:
+      // `renew()` needs it. Only a record that can do nothing at all is cleared.
+      if (!canRenew(who)) clearSession(app);
       return null;
     }
     return who;
+  }
+
+  /**
+   * Trade the stored refresh credential for a fresh access token, silently.
+   *
+   * No window, no gesture, no passkey prompt — this is what "stay signed in for
+   * a week" actually is. Returns the new session, or null when there is nothing
+   * to renew from, in which case the caller should ask for a real sign-in.
+   *
+   * Requires `passkey.js`, which owns the Memphis transport. A page that only
+   * loads this file can still sign in; it just cannot renew silently.
+   *
+   * ⚠️ The old refresh token is dead the moment the exchange returns, and
+   * presenting it again revokes the entire chain. So the new pair is persisted
+   * before this resolves, and a failed write is treated as a failed renewal
+   * rather than being ignored — a chain we cannot record is a chain we have
+   * already lost.
+   */
+  function renew(app) {
+    var who = readStored(app);
+    if (!canRenew(who)) {
+      if (who && !who.expiresAtMs) clearSession(app);
+      return Promise.resolve(null);
+    }
+    var pk = global.MemphisPasskey;
+    if (!pk || typeof pk.exchangeRefresh !== "function") {
+      return Promise.resolve(null);   // passkey.js absent; sign in the long way
+    }
+    return pk.exchangeRefresh(who.refreshToken, global.location.origin)
+      .then(function (r) {
+        var next = {
+          app: app,
+          name: who.name,
+          anchorId: who.anchorId,
+          token: r.scoped_token_hex,
+          origin: global.location.origin,
+          expiresAtMs: expiryMsFrom(r.expires_at_ns),
+          refreshToken: r.refresh_token_hex,
+          refreshExpiresAtMs: msFromNs(r.refresh_expires_at_ns),
+          // The chain ceiling never moves, so it is carried, not re-read.
+          refreshAbsoluteExpiresAtMs: who.refreshAbsoluteExpiresAtMs || 0,
+        };
+        persist(app, next);
+        return next;
+      })
+      .catch(function () {
+        // A refused exchange means the chain is gone — lapsed, revoked, or
+        // revoked BECAUSE this token was replayed. Either way it will never
+        // work again, so drop it rather than retrying into the same wall.
+        clearSession(app);
+        return null;
+      });
   }
 
   function clearSession(app) {
@@ -111,6 +189,12 @@
     return Math.min(cap, parentMs);
   }
 
+  /** Nanoseconds on the wire to milliseconds locally; 0 when absent. */
+  function msFromNs(ns) {
+    var n = Number(ns);
+    return (!ns || !isFinite(n) || n <= 0) ? 0 : Math.floor(n / 1e6);
+  }
+
   function sessionFrom(app, d) {
     return {
       app: app,
@@ -118,7 +202,12 @@
       anchorId: d.anchor_id_hex,
       token: d.scoped_token_hex,
       origin: d.origin,
-      expiresAtMs: expiryMsFrom(d.expires_at_ns)
+      expiresAtMs: expiryMsFrom(d.expires_at_ns),
+      // Absent when Memphis predates P4, or when issuing the chain failed. The
+      // session still works; it just cannot renew without another ceremony.
+      refreshToken: d.refresh_token_hex || null,
+      refreshExpiresAtMs: msFromNs(d.refresh_expires_at_ns),
+      refreshAbsoluteExpiresAtMs: msFromNs(d.refresh_absolute_expires_at_ns)
     };
   }
 
@@ -337,5 +426,6 @@
   global.memphis.connect = connect;
   global.memphis.resume = resume;
   global.memphis.loadSession = loadSession;
+  global.memphis.renew = renew;
   global.memphis.signOut = signOut;
 })(typeof window !== "undefined" ? window : this);

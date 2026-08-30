@@ -313,7 +313,53 @@ Read the response as text first and report the status.
 
 ---
 
-## 5. Account durability
+## 5. Staying signed in
+
+An access token lasts 30 real minutes. On its own that means signing in again
+several times a day — and since registration became a three-factor ceremony,
+"again" is expensive.
+
+So a sign-in also returns a **refresh credential**: long-lived, but deliberately
+weak. It is pinned to one origin, it can only mint short access tokens for that
+origin, and **no path returns a master session from it**. A stolen refresh
+credential is one app's problem, never the identity's.
+
+```ts
+import { ensureSession } from '@thebes/sdk/session'
+
+const session = await ensureSession('My App')   // renews silently if lapsed
+```
+
+No window, no gesture, no passkey prompt. `useMemphisConnect` does this on mount,
+so a React app gets it for free.
+
+| | |
+| --- | --- |
+| Access token | ≤ 30 real minutes, unchanged |
+| Refresh, inactivity | 14 real days, re-armed on every exchange |
+| Refresh, absolute | 30 real days from the ceremony, **never** extended |
+
+**Rotation with reuse detection** is what makes a long-lived credential
+defensible (RFC 9700 §4.14). Every exchange consumes the token it was given and
+issues a new one. Presenting a spent token again is a replay or a stolen copy
+racing the real holder, and both readings end the same way: the entire chain is
+revoked, including access tokens already minted from it. A thief gets one
+window, and whoever moves second trips the alarm.
+
+> ⚠️ `exchange_refresh` returns **both** halves and kills the one you presented.
+> A client that stores only the access token has silently ended its own chain.
+> Store both, together, or neither.
+
+Sign-out-everywhere still works: a chain records the anchor epoch it began at, so
+`revoke_all_sessions_for_anchor` kills every chain for that person.
+
+Silent renewal needs `passkey.js` loaded alongside `memphis-connect.js`, because
+that is where the Memphis transport lives. Without it, sign-in still works — it
+just stops being durable, which is the right way round for a missing script.
+
+---
+
+## 6. Account durability
 
 Since 2026-08-29 an anchor is a **set of factors**, not a single passkey.
 
@@ -337,7 +383,7 @@ Since 2026-08-29 an anchor is a **set of factors**, not a single passkey.
 
 ---
 
-## 6. Sessions and the clock
+## 7. Sessions and the clock
 
 Memphis TTLs are written against the substrate clock, which runs at
 `CANISTER_SECONDS_PER_REAL_SECOND = 13`. The constants therefore read as
@@ -350,7 +396,7 @@ boundary. It is not the same clock and the two must not be merged.
 
 ---
 
-## 7. What to pin
+## 8. What to pin
 
 | | Pin | Note |
 | --- | --- | --- |
@@ -365,7 +411,7 @@ copy was the stale one and a product tree held the fix.
 
 ---
 
-## 8. Pre-flight checklist
+## 9. Pre-flight checklist
 
 - [ ] `origin` is a stable label you will never change; `AUDIENCE` is the URL.
 - [ ] Every gated method uses `await*`.
@@ -375,5 +421,9 @@ copy was the stale one and a product tree held the fix.
 - [ ] The passkey client calls `/api/v1/canister/<cid>/query`.
 - [ ] `#Unauthorized` is surfaced to the user as *"signed in for another site"*,
       not as a generic failure — it is the single most common misconfiguration.
+- [ ] Sessions are read with `ensureSession`, not `getSession`, wherever an
+      await is possible — otherwise nobody stays signed in.
+- [ ] `passkey.js` is loaded alongside `memphis-connect.js` on any page that
+      should renew silently.
 - [ ] A "Security & recovery" screen exists: list factors, add, remove (with the
       24 h notice), and set a recovery phrase.

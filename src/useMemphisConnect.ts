@@ -26,8 +26,8 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
-  getSession, signIn as doSignIn, signOut as doSignOut,
-  resumeFromRedirect, onSessionChange,
+  signIn as doSignIn, signOut as doSignOut,
+  resumeFromRedirect, onSessionChange, ensureSession,
   type ConnectSession, type ConnectOptions, type LegacySessionKey,
 } from './session.js'
 
@@ -57,17 +57,29 @@ export function useMemphisConnect(app: string, legacy: LegacySessionKey[] = []):
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
 
+  const cleanup = useState<{ fn?: () => void }>(() => ({}))[0]
+
   useEffect(() => {
     // Order matters. A redirect-mode return arrives in the URL fragment and must
     // be consumed on this load — resumeFromRedirect also strips the fragment, so
     // a token is never left in the address bar. Only if there is nothing to
     // collect do we fall back to a session held from an earlier visit.
-    try { setSession(resumeFromRedirect() ?? getSession(app, legacy)) }
-    catch { /* memphis-connect.js not present yet */ }
+    const returned = (() => { try { return resumeFromRedirect() } catch { return null } })()
+    if (returned) setSession(returned)
+    else {
+      // Renew silently if the access token has lapsed. This is what makes a
+      // week-old tab work without a passkey prompt; `getSession` alone would
+      // show the sign-in button to someone who never actually signed out.
+      let cancelled = false
+      ensureSession(app, legacy).then((s) => { if (!cancelled) setSession(s) })
+      // eslint-disable-next-line @typescript-eslint/no-extra-semi
+      ;(cleanup as { fn?: () => void }).fn = () => { cancelled = true }
+    }
 
     // Another tab signing out should not leave this one holding a token it has
     // forgotten, and another tab signing in should fill this one in.
-    return onSessionChange(app, setSession)
+    const unsubscribe = onSessionChange(app, setSession)
+    return () => { cleanup.fn?.(); unsubscribe() }
     // `legacy` is a config array, not state; re-running on a new array identity
     // would re-adopt on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
