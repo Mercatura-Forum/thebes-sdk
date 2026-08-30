@@ -41,17 +41,20 @@ It is correct **only** when your namespace already *is* the URL.
 ## 2. The flow, end to end
 
 ```
- browser                          Memphis (921)                    your contract
- ───────                          ─────────────                    ─────────────
- signInOrRegister(name)
-   ├─ begin_authentication ─────────►
-   ◄──────────────────────── challenge
-   ├─ navigator.credentials.get
-   ├─ authenticate ─────────────────►
-   ◄──────────── master session token   (never leaves the browser)
-   ├─ issue_scoped_session(tok,
-   │    location.origin, ttl) ────────►
-   ◄──────────── SCOPED token
+ your page              connect window            Memphis (921)        your contract
+ (my-app.com)          (Memphis origin)           ─────────────        ─────────────
+ memphis.connect()
+   ├─ opens ──────────────►
+                    begin_authentication ───────────►
+                    ◄─────────────────────── challenge
+                    navigator.credentials.get   ← the RP-ID wall is why
+                    authenticate ───────────────────►  this runs HERE
+                    ◄──── master session token   (never leaves this origin)
+                    issue_scoped_session(tok,
+                      "https://my-app.com") ────────►
+                    ◄──── SCOPED token
+   ◄─ postMessage ──────┤
+   │   (or #fragment)
    │
    └─ call(yourContract, method, { session: scopedToken, … }) ────────────►
                                                                     verifyWithAudience
@@ -150,6 +153,80 @@ you want the hygiene.
 ---
 
 ## 4. The browser half
+
+### Which sign-in your app needs
+
+A WebAuthn credential is bound to a **Relying Party ID**, and a page may only
+claim an RP ID that is a registrable-domain suffix of its own origin. Memphis
+anchors live under one RP ID. So a page served from `my-app.com` **physically
+cannot** run the Memphis passkey ceremony — the browser refuses before any of our
+code runs.
+
+| Your app is served from | Use | Runtime |
+| --- | --- | --- |
+| the Memphis origin | `useMemphis` | `passkey.js` |
+| **its own domain** | `useMemphisConnect(app)` | `memphis-connect.js` |
+
+Almost every real app is the second row.
+
+### Connect: sign-in from your own domain
+
+```html
+<script src="./memphis-connect.js"></script>
+```
+
+```tsx
+const auth = useMemphisConnect('My App')
+
+<button onClick={() => auth.signIn({ mode: 'auto' })}>Sign in</button>
+
+// auth.token is the origin-scoped session token. Pass it to your contract.
+await update(CID, 'myProfile', encodeArgs([{ type: 'blob', value: auth.token }]))
+```
+
+The ceremony happens in a window at the Memphis origin. That window holds the
+master session, exchanges it for a token minted **for your origin**, and hands
+back only that. Your app never sees a master token, and nothing needs
+allowlisting — which is why it works for any domain, including ones we have never
+heard of. It is the same shape as Internet Identity's per-frontend delegation.
+
+**`mode`**: `"popup"` (default), `"redirect"`, or `"auto"` — a popup that falls
+back to a full-page redirect when the browser blocks it. Use `"auto"` in
+production: an in-app WebView (Instagram, LinkedIn) and iOS Safari outside a
+gesture will block a popup, and without the fallback those users simply cannot
+sign in. In redirect mode `useMemphisConnect` collects the answer on the next
+page load; if you drive `window.memphis` directly, call `memphis.resume()`
+yourself on load.
+
+**Call `signIn` from a user gesture.** A popup opened outside one is blocked, and
+a redirect outside one is a navigation the person did not ask for. Do not `await`
+anything before it — an await ends the gesture, and this is the single most common
+way a working implementation stops working on iPhone.
+
+### The security property, and how to not break it
+
+A page may **lie** about its origin in the request. It gains nothing, because the
+answer is delivered only to the origin it claimed:
+
+- **popup** — `postMessage(payload, RETURN_TO)`, never `"*"`. The browser refuses
+  delivery when the opener's real origin is not `RETURN_TO`. The liar gets silence.
+- **redirect** — the return URL must be same-origin with the claimed origin, so
+  the credential lands on the victim's own page where the liar cannot read it.
+
+Both are the browser's to enforce, which is what makes them worth relying on.
+Widening the target origin to `"*"`, or accepting a return URL on a different
+origin than the claimed one, removes the only thing protecting every app on the
+chain. This is tested rather than believed — `e2e_origin_lie.py`, with an
+anti-vacuity control proving the ceremony actually ran before the attacker got
+nothing.
+
+> The redirect token arrives in the URL **fragment**, never the query string, so
+> it is not sent to your server and does not appear in a `Referer` header or an
+> access log. If your app has an open redirect it can bounce that fragment to an
+> attacker — the same failure OAuth deployments have had for fifteen years.
+> Validate your own return paths.
+
+### If you are on the Memphis origin
 
 ```tsx
 import { MemphisGate, useAuth } from '@thebes/sdk'

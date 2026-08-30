@@ -47,11 +47,14 @@ snapshots are refreshed.
 | Path | What it is |
 | --- | --- |
 | `runtime/boundary.js` | Browser boundary client (`window.EgyptBoundary`): Candid encode/decode, persisted browser identity, call + receipt polling. |
-| `runtime/passkey.js` | Memphis passkey client (`window.MemphisPasskey`): WebAuthn sign-in → session. |
+| `runtime/passkey.js` | Memphis passkey client (`window.MemphisPasskey`): WebAuthn sign-in → session. **Only works on the Memphis origin** — see below. |
+| `runtime/memphis-connect.js` | `window.memphis.connect()` — sign-in for an app served from **its own domain**. Popup or full-page redirect. |
 | `src/thebes.ts` | Typed wrapper over the boundary client — `query` / `update`, media upload, decoders. Framework-agnostic. |
 | `src/useThebes.ts` | React hooks — `useQuery`, `useUpdate`, `useMediaUpload`. |
-| `src/useMemphis.ts` | React hook — `useMemphis` (passkey session). |
-| `src/MemphisGate.tsx` | `<MemphisGate>` auth gate + `useAuth()` + `<SignOutChip>`. |
+| `src/useMemphis.ts` | React hook — `useMemphis` (passkey session, Memphis origin only). |
+| `src/useMemphisConnect.ts` | React hook — `useMemphisConnect(app)` for an app on its own domain. |
+| `src/MemphisGate.tsx` | `<MemphisGate>` auth gate + `useAuth()` + `<SignOutChip>` (Memphis origin only). |
+| `src/MemphisConnectGate.tsx` | `<MemphisConnectGate app>` + `useConnectAuth()` + `<ConnectChip>` for an app on its own domain. |
 
 ## Identity
 
@@ -62,6 +65,21 @@ that are not style preferences: `await*` rather than `await`, the `_u` bindings
 rather than the `query` ones, the `origin`/`audience` split, discoverable
 credentials, and confirm-before-mint. Each one is written down because getting it
 wrong produced a bug that did not look like an auth bug.
+
+**Which sign-in do you need?** A WebAuthn credential is bound to a Relying
+Party ID, and a page may only claim an RP ID that is a registrable-domain
+suffix of its own origin. So the passkey ceremony physically cannot run on your
+domain.
+
+| Your app is served from | Use | Runtime to load |
+| --- | --- | --- |
+| the Memphis origin | `useMemphis` | `passkey.js` |
+| **its own domain** | `<MemphisConnectGate app>` / `useMemphisConnect(app)` | `memphis-connect.js` |
+
+`useMemphisConnect` opens the ceremony in a window at the Memphis origin, which
+attenuates the master session into a token minted for *your* origin and hands
+back only that. Your app never sees a master token, and no allowlisting is
+needed — it works for any domain, including ones we have never heard of.
 
 ## Use it (React + Vite)
 
@@ -76,13 +94,14 @@ Add the SDK as a pinned dependency — no registry account required:
 import { MemphisGate, useAuth, useQuery, useUpdate, encodeArgs, decodeVecRecord } from '@thebes/sdk'
 ```
 
-The two browser runtimes load as plain `<script>` tags. Sync them into your app's
-`public/` at build time:
+The browser runtimes load as plain `<script>` tags. Sync the ones you use into
+your app's `public/` at build time (swap `memphis-connect.js` for `passkey.js`
+only if your app is served from the Memphis origin):
 
 ```jsonc
 // package.json scripts
 {
-  "sync-sdk": "mkdir -p public && cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/passkey.js public/",
+  "sync-sdk": "mkdir -p public && cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/memphis-connect.js public/",
   "dev": "npm run sync-sdk && vite",
   "build": "npm run sync-sdk && tsc -b && vite build"
 }
@@ -91,7 +110,7 @@ The two browser runtimes load as plain `<script>` tags. Sync them into your app'
 ```html
 <!-- index.html -->
 <script src="./boundary.js"></script>
-<script src="./passkey.js"></script>
+<script src="./memphis-connect.js"></script>
 ```
 
 ## The backend library
