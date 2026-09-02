@@ -1,7 +1,7 @@
 # Thebes Protocol SDK
 
 The developer SDK and starting point for building on
-[Thebes Protocol](https://github.com/Mercatura-Forum/Thebes-Protocol-) — a
+[Thebes Protocol](https://thebesprotocol.com) — a
 high-throughput Layer 1 with on-chain threshold signing, passkey identity, and
 certified asset hosting.
 
@@ -47,11 +47,50 @@ snapshots are refreshed.
 | Path | What it is |
 | --- | --- |
 | `runtime/boundary.js` | Browser boundary client (`window.EgyptBoundary`): Candid encode/decode, persisted browser identity, call + receipt polling. |
-| `runtime/passkey.js` | Memphis passkey client (`window.MemphisPasskey`): WebAuthn sign-in → session. |
+| `runtime/passkey.js` | Memphis passkey client (`window.MemphisPasskey`): WebAuthn sign-in → session. **Only works on the Memphis origin** — see below. |
+| `runtime/memphis-connect.js` | `window.memphis.connect()` — sign-in for an app served from **its own domain**. Popup or full-page redirect. |
 | `src/thebes.ts` | Typed wrapper over the boundary client — `query` / `update`, media upload, decoders. Framework-agnostic. |
 | `src/useThebes.ts` | React hooks — `useQuery`, `useUpdate`, `useMediaUpload`. |
-| `src/useMemphis.ts` | React hook — `useMemphis` (passkey session). |
-| `src/MemphisGate.tsx` | `<MemphisGate>` auth gate + `useAuth()` + `<SignOutChip>`. |
+| `src/useMemphis.ts` | React hook — `useMemphis` (passkey session, Memphis origin only). |
+| `src/session.ts` | **Framework-free** session API — `ensureSession` / `getSession` / `signIn` / `signOut` / `resumeFromRedirect` / `onSessionChange`. Use it from a static page, Vue, Svelte, or a script tag. |
+| `src/useMemphisConnect.ts` | React hook — `useMemphisConnect(app)`, a thin face over `session.ts`. |
+| `src/MemphisGate.tsx` | `<MemphisGate>` auth gate + `useAuth()` + `<SignOutChip>` (Memphis origin only). |
+| `src/MemphisConnectGate.tsx` | `<MemphisConnectGate app>` + `useConnectAuth()` + `<ConnectChip>` for an app on its own domain. |
+
+## Identity
+
+Read **[`docs/memphis.md`](./docs/memphis.md)** before wiring authentication. It
+is the canonical guide to both halves of the Memphis integration — the browser
+passkey ceremony and the backend `MemphisAuth` gate — and it carries the rules
+that are not style preferences: `await*` rather than `await`, the `_u` bindings
+rather than the `query` ones, the `origin`/`audience` split, discoverable
+credentials, and confirm-before-mint. Each one is written down because getting it
+wrong produced a bug that did not look like an auth bug.
+
+**Which sign-in do you need?** A WebAuthn credential is bound to a Relying
+Party ID, and a page may only claim an RP ID that is a registrable-domain
+suffix of its own origin. So the passkey ceremony physically cannot run on your
+domain.
+
+| Your app is served from | Use | Runtime to load |
+| --- | --- | --- |
+| the Memphis origin | `useMemphis` | `passkey.js` |
+| **its own domain** | `<MemphisConnectGate app>` / `useMemphisConnect(app)` | `memphis-connect.js` |
+
+Not on React? **`session.ts`** is the same thing without it, and it is what the
+hook is built on, so both get identical behaviour:
+
+```ts
+import { ensureSession, signIn, resumeFromRedirect } from '@thebes/sdk/session'
+
+const held = resumeFromRedirect() ?? await ensureSession('My App')  // renews silently
+button.onclick = () => signIn('My App')   // from a gesture, never after an await
+```
+
+`useMemphisConnect` opens the ceremony in a window at the Memphis origin, which
+attenuates the master session into a token minted for *your* origin and hands
+back only that. Your app never sees a master token, and no allowlisting is
+needed — it works for any domain, including ones we have never heard of.
 
 ## Use it (React + Vite)
 
@@ -59,20 +98,21 @@ Add the SDK as a pinned dependency — no registry account required:
 
 ```jsonc
 // package.json
-{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.1.1" } }
+{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.4.0" } }
 ```
 
 ```ts
 import { MemphisGate, useAuth, useQuery, useUpdate, encodeArgs, decodeVecRecord } from '@thebes/sdk'
 ```
 
-The two browser runtimes load as plain `<script>` tags. Sync them into your app's
-`public/` at build time:
+The browser runtimes load as plain `<script>` tags. Sync the ones you use into
+your app's `public/` at build time (swap `memphis-connect.js` for `passkey.js`
+only if your app is served from the Memphis origin):
 
 ```jsonc
 // package.json scripts
 {
-  "sync-sdk": "mkdir -p public && cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/passkey.js public/",
+  "sync-sdk": "mkdir -p public && cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/memphis-connect.js public/",
   "dev": "npm run sync-sdk && vite",
   "build": "npm run sync-sdk && tsc -b && vite build"
 }
@@ -81,7 +121,7 @@ The two browser runtimes load as plain `<script>` tags. Sync them into your app'
 ```html
 <!-- index.html -->
 <script src="./boundary.js"></script>
-<script src="./passkey.js"></script>
+<script src="./memphis-connect.js"></script>
 ```
 
 ## Failure handling
@@ -129,12 +169,17 @@ through [mops](https://mops.one) as a git dependency:
 ```toml
 # mops.toml
 [dependencies]
-thebes-lib = "https://github.com/Mercatura-Forum/thebes-lib#v0.1.0"
+thebes-lib = "https://github.com/Mercatura-Forum/thebes-lib#v1.0.0"
 ```
 
 ```motoko
 import Admin "mo:thebes-lib/Admin";
 ```
+
+> Pin `v1.0.0` or later. `v0.4.0` and earlier predate origin-scoped sessions:
+> `MemphisAuth.verify` resolved a token at *any* origin, so a token your app was
+> handed authenticated as that user at every other Thebes app. See
+> [`docs/memphis.md`](./docs/memphis.md).
 
 ## Roadmap
 

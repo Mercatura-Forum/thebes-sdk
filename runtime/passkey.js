@@ -4,7 +4,7 @@
  * Talks to:
  *   POST /api/call                    (boundary passthrough → validator /api/call)
  *   GET  /api/receipt?hash=<hex>      (boundary passthrough → validator /api/receipt)
- *   POST /api/v1/contract/921/query   (boundary query passthrough)
+ *   POST /api/v1/canister/921/query   (boundary query passthrough)
  *
  * Surface exposed at window.MemphisPasskey:
  *   register(name)               -> { name, anchor_id_hex, session_token_hex, expires_at_ns, display_tag }
@@ -15,11 +15,19 @@
  *   loadSession()                -> { name, anchor_id_hex, session_token_hex, expires_at_ns, display_tag } | null
  *   saveSession(session)
  *   clearSession()               -> localStorage-only (legacy; does not revoke server-side)
- *   signOut()                    -> async; calls end_session on contract, then clearSession()
+ *   signOut()                    -> async; calls end_session on canister, then clearSession()
  *
- * The Memphis contract is at cid 921; RP_ID matches the page's origin
- * (memphis.mercaturaforum.com). Showcase build of the contract accepts a
- * single passkey factor at registration (MIN_FACTORS_AT_SIGNUP=1).
+ * The Memphis canister is at cid 921; RP_ID matches the page's origin
+ * (memphis.mercaturaforum.com).
+ *
+ * REGISTRATION TAKES THREE FACTORS (MIN_FACTORS_AT_SIGNUP = 3 since
+ * 2026-08-29): a device passkey, a second passkey, and a recovery phrase.
+ * `register(name)` below sends ONE and is kept only for a canister that still
+ * accepts that; against cid 921 it is refused with InsufficientFactors. Drive
+ * a signup through beginRegistrationChallenge + buildDeviceFactor x2 +
+ * buildRecoveryFactor + registerWithFactors, which is what the connect broker
+ * and every current example do. `recovery.js` must be loaded alongside this
+ * file for the phrase factor.
  */
 (function (global) {
     "use strict";
@@ -151,32 +159,59 @@
     // type-ref position; they MUST appear in the type table and the
     // field references the index.
     function encVecFactorRegistration(factors) {
+        // Blob fields plus the optional `kind : opt FactorKindArg` (P2.4 —
+        // marks a signup factor as the recovery phrase; absent ⇒ WebAuthn).
+        // A canister that predates the field skips it per Candid width
+        // subtyping, so this encoding is safe against cid 921 as deployed.
+        const KIND_ORDER = ["WebAuthn", "RecoveryPhrase"]
+            .map(n => ({ name: n, hash: candidFieldHash(n) }))
+            .sort((a, b) => a.hash - b.hash);
         const sorted = FACTOR_REG_FIELDS
             .map(([n, t]) => ({ name: n, hash: candidFieldHash(n), t }))
+            .concat([{ name: "kind", hash: candidFieldHash("kind"), t: "optkind" }])
             .sort((a, b) => a.hash - b.hash);
         const out = [];
         out.push(0x44, 0x49, 0x44, 0x4c);
-        out.push(...uleb(3));
+        out.push(...uleb(5));
         // T0 = vec nat8 (blob)
         out.push(...sleb(TY.VEC));
         out.push(...sleb(TY.BLOB_BYTES));
-        // T1 = record { fields → T0 }
+        // T1 = variant { kinds → null }
+        out.push(...sleb(-21));
+        out.push(...uleb(KIND_ORDER.length));
+        for (const k of KIND_ORDER) {
+            out.push(...uleb(k.hash));
+            out.push(...sleb(-1)); // null payload
+        }
+        // T2 = opt T1
+        out.push(...sleb(TY.OPT));
+        out.push(...sleb(1));
+        // T3 = record { blob fields → T0, kind → T2 }
         out.push(...sleb(TY.RECORD));
         out.push(...uleb(sorted.length));
         for (const f of sorted) {
             out.push(...uleb(f.hash));
-            out.push(...sleb(0)); // type ref → T0
+            out.push(...sleb(f.t === "optkind" ? 2 : 0));
         }
-        // T2 = vec T1
+        // T4 = vec T3
         out.push(...sleb(TY.VEC));
-        out.push(...sleb(1)); // type ref → T1
-        // 1 arg of type T2
+        out.push(...sleb(3));
+        // 1 arg of type T4
         out.push(...uleb(1));
-        out.push(...sleb(2));
+        out.push(...sleb(4));
         // value
         out.push(...uleb(factors.length));
         for (const f of factors) {
             for (const fd of sorted) {
+                if (fd.t === "optkind") {
+                    const k = f.kind;
+                    if (k == null) { out.push(0x00); continue; }
+                    const idx = KIND_ORDER.findIndex(e => e.name === k);
+                    if (idx < 0) throw new Error("unknown factor kind " + k);
+                    out.push(0x01);
+                    out.push(...uleb(idx));
+                    continue;
+                }
                 const v = f[fd.name];
                 if (!(v instanceof Uint8Array)) throw new Error("factor field " + fd.name + " must be Uint8Array");
                 out.push(...uleb(v.length));
@@ -246,6 +281,50 @@
         return new Uint8Array(out);
     }
 
+
+    // Encode `(blob, text, nat64)` for issue_scoped_session.
+    function encScopedSessionArgs(token, origin, ttlNs) {
+        const tokenBytes = token instanceof Uint8Array ? token : hexToBytes(token);
+        const originBytes = utf8.encode(origin);
+        const out = [];
+        out.push(0x44, 0x49, 0x44, 0x4c);
+        out.push(...uleb(1));
+        out.push(...sleb(TY.VEC));
+        out.push(...sleb(TY.BLOB_BYTES));
+        out.push(...uleb(3));
+        out.push(...sleb(0));
+        out.push(...sleb(TY.TEXT));
+        out.push(...sleb(TY.NAT64));
+        out.push(...uleb(tokenBytes.length));
+        for (const b of tokenBytes) out.push(b);
+        out.push(...uleb(originBytes.length));
+        for (const b of originBytes) out.push(b);
+        const v = BigInt(ttlNs);
+        for (let i = 0n; i < 8n; i++) out.push(Number((v >> (i * 8n)) & 0xffn));
+        return new Uint8Array(out);
+    }
+
+    // Encode `(blob, text)` for issue_refresh / exchange_refresh. Same shape as
+    // encScopedSessionArgs without the ttl: the canister owns the lifetimes, so
+    // there is nothing for a client to ask for and nothing it could inflate.
+    function encBlobTextArgs(token, text) {
+        const tokenBytes = token instanceof Uint8Array ? token : hexToBytes(token);
+        const textBytes = utf8.encode(text);
+        const out = [];
+        out.push(0x44, 0x49, 0x44, 0x4c);
+        out.push(...uleb(1));
+        out.push(...sleb(TY.VEC));
+        out.push(...sleb(TY.BLOB_BYTES));
+        out.push(...uleb(2));
+        out.push(...sleb(0));
+        out.push(...sleb(TY.TEXT));
+        out.push(...uleb(tokenBytes.length));
+        for (const b of tokenBytes) out.push(b);
+        out.push(...uleb(textBytes.length));
+        for (const b of textBytes) out.push(b);
+        return new Uint8Array(out);
+    }
+
     // Encode `(blob, text, text, nat64)` for claim_name.
     function encClaimNameArgs(token, name, origin, version) {
         const tokenBytes = token instanceof Uint8Array ? token : hexToBytes(token);
@@ -285,7 +364,7 @@
     // small and easy to audit.
 
     function skipTypeTable(u8, off) {
-        // We don't *use* the type table for the value walker — the contract
+        // We don't *use* the type table for the value walker — the canister
         // emits a well-known shape per method — but we have to advance past
         // it. Each type def is a sleb followed by a variable structure.
         const [tts, a1] = readUleb(u8, off); off = a1;
@@ -347,7 +426,7 @@
     }
 
     // Decode a `variant { Ok : record { anchor_id : blob; session_token : blob; expires_at_ns : nat64 }; Err : MemphisError }`.
-    // We rely on the contract always emitting fields in hash-sorted order
+    // We rely on the canister always emitting fields in hash-sorted order
     // (Candid mandates this); the actual hashes are:
     //   anchor_id      = candidFieldHash("anchor_id")      = 0x00B2D8B8 = 11721912
     //   session_token  = candidFieldHash("session_token")  = ...
@@ -413,6 +492,36 @@
         return { err: extractErrorTag(replyBytes, off, tag) };
     }
 
+    // Decode `variant { Ok : record {...}; Err : MemphisError }` for any field
+    // list. The two decoders above are this function with their field lists
+    // inlined; new records use this rather than growing a third copy.
+    // Candid mandates hash-sorted field order on the wire, which is what
+    // sortedFieldOrder reproduces — the declaration order here is irrelevant.
+    function decodeResultRecordFields(replyBytes, fields) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const [tag, a1] = readUleb(replyBytes, off); off = a1;
+        if (tag !== 0n) return { err: extractErrorTag(replyBytes, off, tag) };
+        const rec = {};
+        for (const fd of sortedFieldOrder(fields)) {
+            if (fd.t === "blob") {
+                const [len, ax] = readUleb(replyBytes, off); off = ax;
+                rec[fd.name] = replyBytes.slice(off, off + Number(len));
+                off += Number(len);
+            } else if (fd.t === "nat64") {
+                let v = 0n;
+                for (let i = 0n; i < 8n; i++) v |= BigInt(replyBytes[off + Number(i)]) << (i * 8n);
+                rec[fd.name] = v;
+                off += 8;
+            } else if (fd.t === "text") {
+                const [len, ax] = readUleb(replyBytes, off); off = ax;
+                rec[fd.name] = utf8d.decode(replyBytes.slice(off, off + Number(len)));
+                off += Number(len);
+            }
+        }
+        return { ok: rec };
+    }
+
     // Decode `(opt blob)` reply for anchor_for_name / lookup_name.
     function decodeOptBlob(replyBytes) {
         let off = expectDidlMagic(replyBytes);
@@ -440,17 +549,48 @@
                      .sort((a, b) => a.hash - b.hash);
     }
 
-    // Inspect the variant payload after the tag — we don't decode the
-    // MemphisError exhaustively, we just stringify the tag id for display.
-    function extractErrorTag(_u8, _off, tag) {
-        const NAMES = [
-            "Ok", // 0 = Ok branch
-            "NotAuthenticated", "Unauthorized", "SessionExpired", "ChallengeExpired",
-            "AnchorNotFound", "FactorNotFound", "InsufficientFactors", "DuplicateCredential",
-            "InvalidArgument", "InvariantViolation",
-        ];
-        const idx = Number(tag);
-        return { tag: idx, name: NAMES[idx] || ("variant#" + idx) };
+    // Decode the MemphisError variant payload that follows the outer Err tag.
+    // Candid orders variant fields by FIELD HASH, not declaration order — the
+    // previous version of this function mapped the OUTER tag through a
+    // positional table and rendered every error as "NotAuthenticated". This
+    // one reads the INNER variant tag and resolves it through the hash-sorted
+    // name list, and decodes the payload of the carriers so the UI can show
+    // the canister's actual sentence.
+    const MEMPHIS_ERROR_VARIANTS = [
+        "NotAuthenticated", "Unauthorized", "SessionExpired", "ChallengeExpired",
+        "AnchorNotFound", "FactorNotFound", "InsufficientFactors", "DuplicateCredential",
+        "InvalidArgument", "InvariantViolation", "RemovalDelayNotElapsed",
+    ];
+    function extractErrorTag(u8, off, tag) {
+        if (Number(tag) !== 1) return { tag: Number(tag), name: "variant#" + tag };
+        const order = MEMPHIS_ERROR_VARIANTS
+            .map(n => ({ name: n, hash: candidFieldHash(n) }))
+            .sort((a, b) => a.hash - b.hash);
+        const [itag, a1] = readUleb(u8, off); off = a1;
+        const entry = order[Number(itag)];
+        const name = entry ? entry.name : ("error#" + itag);
+        const out = { tag: 1, name };
+        try {
+            if (name === "InvalidArgument") {
+                const [len, a2] = readUleb(u8, off); off = a2;
+                out.message = utf8d.decode(u8.slice(off, off + Number(len)));
+            } else if (name === "InvariantViolation") {
+                // record { id : text; details : text } in hash order.
+                const rec = {};
+                for (const fd of sortedFieldOrder([["id", "text"], ["details", "text"]])) {
+                    const [len, a2] = readUleb(u8, off); off = a2;
+                    rec[fd.name] = utf8d.decode(u8.slice(off, off + Number(len)));
+                    off += Number(len);
+                }
+                out.id = rec.id;
+                out.message = rec.details;
+            } else if (name === "RemovalDelayNotElapsed") {
+                let v = 0n;
+                for (let i = 0n; i < 8n; i++) v |= BigInt(u8[off + Number(i)]) << (i * 8n);
+                out.effective_at_ns = v;
+            }
+        } catch (_) { /* payload decode is best-effort; the name is what matters */ }
+        return out;
     }
 
     // ─── boundary transport ────────────────────────────────────────────────
@@ -459,7 +599,7 @@
         // Anonymous calls need a fresh sender per submission, otherwise the
         // validator's per-(sender, nonce) replay set rejects the second call
         // from "sender=""" with "nonce 0 already used". We don't sign these
-        // envelopes (the contract auths via WebAuthn factor proofs, not
+        // envelopes (the canister auths via WebAuthn factor proofs, not
         // msg_caller), so a random 32-byte sender is fine for transport.
         const sender = bytesToHex(randomBytes(32));
         const callRes = await fetch(BOUNDARY + "/api/call", {
@@ -475,7 +615,7 @@
         if (callRes.error) throw new Error("call: " + callRes.error);
         if (!callRes.message_hash) throw new Error("call: missing message_hash in response");
         const hash = callRes.message_hash;
-        // Poll up to ~8 s — single-contract cluster finalises in ~200 ms,
+        // Poll up to ~8 s — single-canister cluster finalises in ~200 ms,
         // so this is generous but bounded.
         const deadline = Date.now() + 8000;
         let lastLifecycle = "submitted";
@@ -488,7 +628,7 @@
                 return hexToBytes(rec.reply);
             }
             if (rec.status === "error") {
-                throw new Error("contract error: " + (rec.error || "unknown"));
+                throw new Error("canister error: " + (rec.error || "unknown"));
             }
         }
         throw new Error("receipt poll timeout (last lifecycle=" + lastLifecycle + ")");
@@ -507,14 +647,14 @@
     }
     async function memphisQuery(method, argBytes) {
         const argB64 = bytesToBase64(argBytes);
-        const res = await fetch(BOUNDARY + "/api/v1/contract/" + MEMPHIS_CID + "/query", {
+        const res = await fetch(BOUNDARY + "/api/v1/canister/" + MEMPHIS_CID + "/query", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ method, arg: argB64, sender: "" }),
         }).then(r => r.json());
         if (res.status !== "success") throw new Error("query: " + (res.error || res.status));
         if (!res.reply) throw new Error("query: empty reply");
-        // /api/v1/contract/{cid}/query returns reply as base64; /api/receipt
+        // /api/v1/canister/{cid}/query returns reply as base64; /api/receipt
         // (used by memphisCallAwait below) returns it as hex.
         return base64ToBytes(res.reply);
     }
@@ -587,7 +727,7 @@
         const credentialId = authData.slice(off, off + credIdLen);
         off += credIdLen;
         // The COSE key is a single CBOR object starting at off; we need its
-        // exact byte span so the contract can re-parse it.
+        // exact byte span so the canister can re-parse it.
         const start = off;
         const [_obj, end] = cborRead(authData, off);
         const credentialPublicKeyBytes = authData.slice(start, end);
@@ -596,14 +736,14 @@
 
     // ─── WebAuthn ceremonies ───────────────────────────────────────────────
     //
-    // Registration is a create()+get() PAIR over the same contract-issued
+    // Registration is a create()+get() PAIR over the same canister-issued
     // challenge, with attestation:"none":
     //   1. create() mints the credential; we extract only the COSE public key
     //      from authData (we do NOT use the attestation statement — "none"
     //      works on iOS/macOS Safari and Android, which don't emit "packed").
     //   2. get() immediately produces a real "webauthn.get" assertion over the
     //      same challenge — a standard ECDSA-P256 sig over
-    //      authData ‖ SHA-256(clientDataJSON). The contract's INV-MEM-7
+    //      authData ‖ SHA-256(clientDataJSON). The canister's INV-MEM-7
     //      verifier REQUIRES clientDataJSON.type == "webauthn.get" (see
     //      crates/memphis-webauthn verify_assertion), so the create-only
     //      ("webauthn.create") path is rejected.
@@ -613,7 +753,7 @@
         // attestation:"none" mints the credential (we only need the COSE public
         // key from authData — no attStmt, so it works on iOS/macOS Safari and
         // Android which return "none"). An immediate get() yields a real
-        // "webauthn.get" assertion, which the contract's INV-MEM-7 REQUIRES
+        // "webauthn.get" assertion, which the canister's INV-MEM-7 REQUIRES
         // (clientDataJSON.type must be "webauthn.get" — see crates/memphis-webauthn
         // verify_assertion). Two user-presence prompts; works on every device.
         const created = await navigator.credentials.create({
@@ -626,13 +766,10 @@
                     displayName: displayName,
                 },
                 pubKeyCredParams: [{ type: "public-key", alg: -7 }],
-                // residentKey "required": sign-in (passkey.js signIn) calls
-                // get() with an EMPTY allowCredentials list — that flow only
-                // finds DISCOVERABLE credentials. Platform passkeys are
-                // always discoverable, but security keys and other
-                // non-resident authenticators minted here could never sign
-                // back in. requireResidentKey is the WebAuthn L1 spelling
-                // for older clients.
+                // residentKey — without it the minted credential is non-
+                // discoverable and signIn's get({allowCredentials: []}) cannot
+                // find it (2026-08-29 register-vs-signIn defect). "required" +
+                // the WebAuthn-L1 spelling matches the thebes-sdk runtime.
                 authenticatorSelection: {
                     residentKey: "required",
                     requireResidentKey: true,
@@ -757,7 +894,14 @@
             ])
         );
         const regDec = decodeResultRecordReg(regReply);
-        if (regDec.err) throw new Error("register: " + regDec.err.name);
+        if (regDec.err) {
+            // Carry the typed variant + the canister's sentence so callers can
+            // react (e.g. INV-MEM-1 → run the multi-factor signup ceremony).
+            const e = new Error("register: " + (regDec.err.message || regDec.err.name));
+            e.code = regDec.err.name;
+            e.errId = regDec.err.id;
+            throw e;
+        }
         const anchorIdHex = bytesToHex(regDec.ok.anchor_id);
         const sessionTokenHex = bytesToHex(regDec.ok.session_token);
 
@@ -774,9 +918,9 @@
             anchor_id_hex: anchorIdHex,
             session_token_hex: sessionTokenHex,
             expires_at_ns: regDec.ok.expires_at_ns.toString(),
-            // Display tag = last 4 hex chars of anchor_id_hex. The contract
+            // Display tag = last 4 hex chars of anchor_id_hex. The canister
             // returns the canonical value in `regDec.ok.display_tag`; if that
-            // field is missing (older contract), fall back to deriving it
+            // field is missing (older canister), fall back to deriving it
             // client-side from anchor_id_hex (same formula, same result).
             display_tag: regDec.ok.display_tag || anchorIdHex.slice(-4),
         };
@@ -795,7 +939,7 @@
         const challenge = dec.ok;
         // 2. navigator.credentials.get with allowCredentials = [] so the
         //    authenticator surfaces all stored credentials matching the rp.
-        //    (We don't track credential ids client-side; the contract will
+        //    (We don't track credential ids client-side; the canister will
         //    refuse if the asserted credential_id isn't bound to the anchor.)
         const assertion = await webauthnGet(challenge, []);
         // 3. authenticate
@@ -813,7 +957,7 @@
             session_token_hex: bytesToHex(authDec.ok.session_token),
             expires_at_ns: authDec.ok.expires_at_ns.toString(),
             // AuthResult doesn't carry display_tag (the reply is just token +
-            // expiry); derive it client-side from anchor_id. The contract
+            // expiry); derive it client-side from anchor_id. The canister
             // uses the same formula in lib.rs:display_tag().
             display_tag: bytesToHex(anchorBytes).slice(-4),
         };
@@ -839,6 +983,425 @@
         throw err;
     }
 
+    // ─── P2 — factor lifecycle: add device / recovery phrase / remove ──────
+    //
+    // Canister surface (canisters/memphis/src/lib.rs):
+    //   begin_add_factor(session_token)                       -> challenge
+    //   add_factor(session_token, FactorRegistration, kind)   -> AddFactorResult
+    //   remove_factor(session_token, factor_id)               -> RemoveFactorStatus
+    //   cancel_factor_removal(session_token, factor_id)       -> ()
+    //   list_factors(session_token)                           -> vec FactorInfo
+    // A RecoveryPhrase factor is a client-side BIP39-derived P-256 key
+    // (recovery.js / global.MemphisRecovery); its assertions are synthetic but
+    // byte-shape-identical to a platform authenticator's, so the canister's
+    // INV-MEM-7 path verifies both the same way.
+
+    const TY_NULL = -1;
+    const TY_VARIANT = -21;
+    const FACTOR_KIND_VARIANTS = ["WebAuthn", "RecoveryPhrase"];
+
+    function factorKindWireIndex(kindName) {
+        const order = FACTOR_KIND_VARIANTS
+            .map(n => ({ name: n, hash: candidFieldHash(n) }))
+            .sort((a, b) => a.hash - b.hash);
+        const idx = order.findIndex(e => e.name === kindName);
+        if (idx < 0) throw new Error("unknown factor kind " + kindName);
+        return { idx, order };
+    }
+
+    // Encode `(blob, FactorRegistration, FactorKindArg)` for add_factor.
+    function encAddFactorArgs(tokenBytes, factor, kindName) {
+        const sorted = FACTOR_REG_FIELDS
+            .map(([n, t]) => ({ name: n, hash: candidFieldHash(n), t }))
+            .sort((a, b) => a.hash - b.hash);
+        const kind = factorKindWireIndex(kindName);
+        const out = [];
+        out.push(0x44, 0x49, 0x44, 0x4c);
+        out.push(...uleb(3));
+        // T0 = vec nat8 (blob)
+        out.push(...sleb(TY.VEC));
+        out.push(...sleb(TY.BLOB_BYTES));
+        // T1 = record { fields -> T0 }
+        out.push(...sleb(TY.RECORD));
+        out.push(...uleb(sorted.length));
+        for (const f of sorted) {
+            out.push(...uleb(f.hash));
+            out.push(...sleb(0));
+        }
+        // T2 = variant { kinds -> null }, fields in hash order
+        out.push(...sleb(TY_VARIANT));
+        out.push(...uleb(kind.order.length));
+        for (const e of kind.order) {
+            out.push(...uleb(e.hash));
+            out.push(...sleb(TY_NULL));
+        }
+        // 3 args: T0, T1, T2
+        out.push(...uleb(3));
+        out.push(...sleb(0));
+        out.push(...sleb(1));
+        out.push(...sleb(2));
+        // value: blob token
+        out.push(...uleb(tokenBytes.length));
+        for (const b of tokenBytes) out.push(b);
+        // value: record
+        for (const fd of sorted) {
+            const v = factor[fd.name];
+            if (!(v instanceof Uint8Array)) throw new Error("factor field " + fd.name + " must be Uint8Array");
+            out.push(...uleb(v.length));
+            for (const b of v) out.push(b);
+        }
+        // value: variant index (null payload -> nothing)
+        out.push(...uleb(kind.idx));
+        return new Uint8Array(out);
+    }
+
+    // Encode `(blob, blob)` for remove_factor / cancel_factor_removal.
+    function encTwoBlobs(aBytes, bBytes) {
+        const out = [];
+        out.push(0x44, 0x49, 0x44, 0x4c);
+        out.push(...uleb(1));
+        out.push(...sleb(TY.VEC));
+        out.push(...sleb(TY.BLOB_BYTES));
+        out.push(...uleb(2));
+        out.push(...sleb(0));
+        out.push(...sleb(0));
+        for (const bytes of [aBytes, bBytes]) {
+            out.push(...uleb(bytes.length));
+            for (const b of bytes) out.push(b);
+        }
+        return new Uint8Array(out);
+    }
+
+    // Decode `variant { Ok : AddFactorResult; Err }`.
+    function decodeResultAddFactor(replyBytes) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const [tag, a1] = readUleb(replyBytes, off); off = a1;
+        if (tag !== 0n) return { err: extractErrorTag(replyBytes, off, tag) };
+        const rec = {};
+        for (const fd of sortedFieldOrder([["factor_id", "blob"], ["factor_count", "nat64"]])) {
+            if (fd.t === "blob") {
+                const [len, ax] = readUleb(replyBytes, off); off = ax;
+                rec[fd.name] = replyBytes.slice(off, off + Number(len));
+                off += Number(len);
+            } else {
+                let v = 0n;
+                for (let i = 0n; i < 8n; i++) v |= BigInt(replyBytes[off + Number(i)]) << (i * 8n);
+                rec[fd.name] = v;
+                off += 8;
+            }
+        }
+        return { ok: rec };
+    }
+
+    // Decode `variant { Ok : RemoveFactorStatus; Err }` where
+    // RemoveFactorStatus = variant { PendingUntil : record { effective_at_ns };
+    // Removed } (fields hash-sorted on the wire).
+    function decodeResultRemoveFactor(replyBytes) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const [tag, a1] = readUleb(replyBytes, off); off = a1;
+        if (tag !== 0n) return { err: extractErrorTag(replyBytes, off, tag) };
+        const order = ["PendingUntil", "Removed"]
+            .map(n => ({ name: n, hash: candidFieldHash(n) }))
+            .sort((a, b) => a.hash - b.hash);
+        const [itag, a2] = readUleb(replyBytes, off); off = a2;
+        const which = order[Number(itag)] ? order[Number(itag)].name : null;
+        if (which === "Removed") return { ok: { status: "Removed" } };
+        if (which === "PendingUntil") {
+            let v = 0n;
+            for (let i = 0n; i < 8n; i++) v |= BigInt(replyBytes[off + Number(i)]) << (i * 8n);
+            return { ok: { status: "PendingUntil", effective_at_ns: v } };
+        }
+        return { err: { tag: Number(itag), name: "unknown-remove-status" } };
+    }
+
+    // Decode `variant { Ok : vec FactorInfo; Err }` where FactorInfo =
+    // record { factor_id : blob; kind : FactorKindArg; removal_effective_at_ns : opt nat64 }.
+    function decodeResultFactorInfos(replyBytes) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const [tag, a1] = readUleb(replyBytes, off); off = a1;
+        if (tag !== 0n) return { err: extractErrorTag(replyBytes, off, tag) };
+        const kindOrder = FACTOR_KIND_VARIANTS
+            .map(n => ({ name: n, hash: candidFieldHash(n) }))
+            .sort((a, b) => a.hash - b.hash);
+        const fieldOrder = sortedFieldOrder([
+            ["factor_id", "blob"],
+            ["kind", "kind"],
+            ["removal_effective_at_ns", "optnat64"],
+        ]);
+        const [count, a2] = readUleb(replyBytes, off); off = a2;
+        const rows = [];
+        for (let i = 0n; i < count; i++) {
+            const row = {};
+            for (const fd of fieldOrder) {
+                if (fd.t === "blob") {
+                    const [len, ax] = readUleb(replyBytes, off); off = ax;
+                    row[fd.name] = replyBytes.slice(off, off + Number(len));
+                    off += Number(len);
+                } else if (fd.t === "kind") {
+                    const [ktag, ax] = readUleb(replyBytes, off); off = ax;
+                    row[fd.name] = kindOrder[Number(ktag)] ? kindOrder[Number(ktag)].name : ("kind#" + ktag);
+                } else { // opt nat64
+                    const present = replyBytes[off++];
+                    if (present === 0) { row[fd.name] = null; continue; }
+                    let v = 0n;
+                    for (let j = 0n; j < 8n; j++) v |= BigInt(replyBytes[off + Number(j)]) << (j * 8n);
+                    row[fd.name] = v;
+                    off += 8;
+                }
+            }
+            rows.push(row);
+        }
+        return { ok: rows };
+    }
+
+    // ── synthetic (recovery-phrase) assertion envelope ─────────────────────
+    async function sha256b(bytes) {
+        return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    }
+    function bytesToBase64Url(u8) {
+        let bin = "";
+        for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+        return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    // Build the WebAuthn-shaped blobs a platform authenticator would produce,
+    // signed by the phrase-derived key instead: authenticatorData =
+    // rpIdHash ‖ flags(UP|UV) ‖ signCount(0); clientDataJSON carries the
+    // challenge (base64url) and THIS page's origin; the ECDSA message is
+    // authData ‖ SHA-256(clientDataJSON) — exactly what INV-MEM-7 verifies.
+    async function buildRecoveryAssertion(identity, challengeBytes) {
+        const rpIdHash = await sha256b(utf8.encode(RP_ID));
+        const authData = concat(rpIdHash, new Uint8Array([0x05]), new Uint8Array(4));
+        const cdj = utf8.encode(JSON.stringify({
+            type: "webauthn.get",
+            challenge: bytesToBase64Url(challengeBytes),
+            origin: location.origin,
+        }));
+        const cdjHash = await sha256b(cdj);
+        const signature = await identity.sign(concat(authData, cdjHash));
+        return { authenticator_data: authData, client_data_json: cdj, signature };
+    }
+
+    function requireRecoveryModule() {
+        if (!global.MemphisRecovery) {
+            throw new Error("recovery.js not loaded (window.MemphisRecovery missing)");
+        }
+        return global.MemphisRecovery;
+    }
+
+    // ── high-level factor flows ────────────────────────────────────────────
+
+    async function beginAddFactor(sessionTokenHex) {
+        const reply = await memphisCallAwait("begin_add_factor", encBlob(hexToBytes(sessionTokenHex)));
+        const dec = decodeResultBlob(reply);
+        if (dec.err) throw new Error("begin_add_factor: " + (dec.err.message || dec.err.name));
+        return dec.ok;
+    }
+
+    async function submitAddFactor(sessionTokenHex, factorReg, kindName) {
+        const reply = await memphisCallAwait(
+            "add_factor",
+            encAddFactorArgs(hexToBytes(sessionTokenHex), factorReg, kindName)
+        );
+        const dec = decodeResultAddFactor(reply);
+        if (dec.err) throw new Error("add_factor: " + (dec.err.message || dec.err.name));
+        return {
+            factor_id_hex: bytesToHex(dec.ok.factor_id),
+            factor_count: Number(dec.ok.factor_count),
+        };
+    }
+
+    /// Attach a NEW device passkey to the signed-in identity. Two prompts
+    /// (create + assertion probe), same shape as registration.
+    async function addDevice(sessionTokenHex, label) {
+        const challenge = await beginAddFactor(sessionTokenHex);
+        const f = await webauthnCreate(challenge, label || "memphis device");
+        return submitAddFactor(sessionTokenHex, {
+            credential_id: f.credentialId,
+            cose_pub_key_bytes: f.cose_pub_key_bytes,
+            authenticator_data: f.authenticator_data,
+            client_data_json: f.client_data_json,
+            signature: f.signature,
+        }, "WebAuthn");
+    }
+
+    /// Generate a recovery phrase, register its derived key as a
+    /// RecoveryPhrase factor, and hand the phrase back for one-time display.
+    /// The phrase itself never leaves the browser.
+    async function setupRecoveryPhrase(sessionTokenHex) {
+        const R = requireRecoveryModule();
+        const phrase = await R.generatePhrase();
+        const identity = await R.deriveIdentity(phrase);
+        const challenge = await beginAddFactor(sessionTokenHex);
+        const blobs = await buildRecoveryAssertion(identity, challenge);
+        const added = await submitAddFactor(sessionTokenHex, {
+            credential_id: identity.credentialId,
+            cose_pub_key_bytes: identity.cosePubKey,
+            authenticator_data: blobs.authenticator_data,
+            client_data_json: blobs.client_data_json,
+            signature: blobs.signature,
+        }, "RecoveryPhrase");
+        return { phrase, factor_id_hex: added.factor_id_hex, factor_count: added.factor_count };
+    }
+
+    /// Zero-device sign-in: name + recovery phrase, no authenticator involved.
+    async function signInWithRecoveryPhrase(name, phrase) {
+        const R = requireRecoveryModule();
+        const validated = validateName(name);
+        if (!(await R.validatePhrase(phrase))) {
+            throw new Error("that is not a valid recovery phrase — check the words and their order");
+        }
+        const anchorBytes = await lookupAnchor(validated);
+        if (!anchorBytes) throw new Error("no Memphis identity for " + validated);
+        const identity = await R.deriveIdentity(phrase);
+        const challengeReply = await memphisCallAwait("begin_authentication", encBlob(anchorBytes));
+        const dec = decodeResultBlob(challengeReply);
+        if (dec.err) throw new Error("begin_authentication: " + (dec.err.message || dec.err.name));
+        const blobs = await buildRecoveryAssertion(identity, dec.ok);
+        const authReply = await memphisCallAwait("authenticate", encFactorAssertion({
+            credential_id: identity.credentialId,
+            authenticator_data: blobs.authenticator_data,
+            client_data_json: blobs.client_data_json,
+            signature: blobs.signature,
+        }));
+        const authDec = decodeResultRecordAuth(authReply);
+        if (authDec.err) {
+            const n = authDec.err.name;
+            throw new Error(n === "FactorNotFound"
+                ? "this phrase is not registered as a recovery factor for " + validated
+                : "authenticate: " + (authDec.err.message || n));
+        }
+        const session = {
+            name: validated,
+            anchor_id_hex: bytesToHex(anchorBytes),
+            session_token_hex: bytesToHex(authDec.ok.session_token),
+            expires_at_ns: authDec.ok.expires_at_ns.toString(),
+            display_tag: bytesToHex(anchorBytes).slice(-4),
+        };
+        saveSession(session);
+        return session;
+    }
+
+    async function listFactors(sessionTokenHex) {
+        const reply = await memphisQuery("list_factors", encBlob(hexToBytes(sessionTokenHex)));
+        const dec = decodeResultFactorInfos(reply);
+        if (dec.err) throw new Error("list_factors: " + (dec.err.message || dec.err.name));
+        return dec.ok.map(r => ({
+            factor_id_hex: bytesToHex(r.factor_id),
+            kind: r.kind,
+            removal_effective_at_ns: r.removal_effective_at_ns === null
+                ? null : r.removal_effective_at_ns.toString(),
+        }));
+    }
+
+    /// First call marks the removal pending (24h veto window); a call after
+    /// the window completes it. Returns { status, effective_at_ns? }, or
+    /// throws with the canister's RemovalDelayNotElapsed sentence.
+    async function removeFactor(sessionTokenHex, factorIdHex) {
+        const reply = await memphisCallAwait(
+            "remove_factor",
+            encTwoBlobs(hexToBytes(sessionTokenHex), hexToBytes(factorIdHex))
+        );
+        const dec = decodeResultRemoveFactor(reply);
+        if (dec.err) {
+            if (dec.err.name === "RemovalDelayNotElapsed") {
+                const e = new Error("removal is still inside its 24-hour window");
+                e.code = "RemovalDelayNotElapsed";
+                e.effective_at_ns = dec.err.effective_at_ns ? dec.err.effective_at_ns.toString() : null;
+                throw e;
+            }
+            throw new Error("remove_factor: " + (dec.err.message || dec.err.name));
+        }
+        return {
+            status: dec.ok.status,
+            effective_at_ns: dec.ok.effective_at_ns ? dec.ok.effective_at_ns.toString() : null,
+        };
+    }
+
+    async function cancelFactorRemoval(sessionTokenHex, factorIdHex) {
+        const reply = await memphisCallAwait(
+            "cancel_factor_removal",
+            encTwoBlobs(hexToBytes(sessionTokenHex), hexToBytes(factorIdHex))
+        );
+        const dec = decodeResultEmpty(reply);
+        if (dec.err) throw new Error("cancel_factor_removal: " + (dec.err.message || dec.err.name));
+        return true;
+    }
+
+    // ── multi-factor registration (P2.4: MIN_FACTORS_AT_SIGNUP = 3) ────────
+    //
+    // The granular pieces let the UI orchestrate a 3-factor signup ceremony
+    // (device passkey + second passkey + recovery phrase) over ONE
+    // registration challenge. register(name) above stays the 1-factor path
+    // for canisters that still accept it; a caller that receives INV-MEM-1
+    // retries through these.
+
+    async function beginRegistrationChallenge() {
+        const reply = await memphisCallAwait("begin_registration",
+            new Uint8Array([0x44, 0x49, 0x44, 0x4c, 0x00, 0x00]));
+        const dec = decodeResultBlob(reply);
+        if (dec.err) throw new Error("begin_registration: " + (dec.err.message || dec.err.name));
+        return dec.ok;
+    }
+
+    async function buildDeviceFactor(challenge, label) {
+        const f = await webauthnCreate(challenge, label);
+        return {
+            credential_id: f.credentialId,
+            cose_pub_key_bytes: f.cose_pub_key_bytes,
+            authenticator_data: f.authenticator_data,
+            client_data_json: f.client_data_json,
+            signature: f.signature,
+            kind: "WebAuthn",
+        };
+    }
+
+    async function buildRecoveryFactor(challenge, phrase) {
+        const R = requireRecoveryModule();
+        const identity = await R.deriveIdentity(phrase);
+        const blobs = await buildRecoveryAssertion(identity, challenge);
+        return {
+            credential_id: identity.credentialId,
+            cose_pub_key_bytes: identity.cosePubKey,
+            authenticator_data: blobs.authenticator_data,
+            client_data_json: blobs.client_data_json,
+            signature: blobs.signature,
+            kind: "RecoveryPhrase",
+        };
+    }
+
+    async function registerWithFactors(name, factors) {
+        const validated = validateName(name);
+        const regReply = await memphisCallAwait("register", encVecFactorRegistration(factors));
+        const regDec = decodeResultRecordReg(regReply);
+        if (regDec.err) {
+            const e = new Error("register: " + (regDec.err.message || regDec.err.name));
+            e.code = regDec.err.name;
+            e.detail = regDec.err.message;
+            throw e;
+        }
+        const anchorIdHex = bytesToHex(regDec.ok.anchor_id);
+        const sessionTokenHex = bytesToHex(regDec.ok.session_token);
+        const claimReply = await memphisCallAwait(
+            "claim_name",
+            encClaimNameArgs(regDec.ok.session_token, validated, location.origin, 0)
+        );
+        const claimDec = decodeResultText(claimReply);
+        if (claimDec.err) throw new Error("claim_name: " + (claimDec.err.message || claimDec.err.name));
+        const session = {
+            name: validated,
+            anchor_id_hex: anchorIdHex,
+            session_token_hex: sessionTokenHex,
+            expires_at_ns: regDec.ok.expires_at_ns.toString(),
+            display_tag: regDec.ok.display_tag || anchorIdHex.slice(-4),
+        };
+        saveSession(session);
+        return session;
+    }
+
     // ─── session storage ───────────────────────────────────────────────────
     const STORAGE_KEY = "memphisSessionV1";
 
@@ -849,7 +1412,7 @@
             const s = JSON.parse(raw);
             if (!s.session_token_hex || !s.anchor_id_hex || !s.name) return null;
             // Back-fill display_tag for sessions stored before P1.2 landed.
-            // Same formula as contracts/memphis/src/lib.rs:display_tag().
+            // Same formula as canisters/memphis/src/lib.rs:display_tag().
             if (!s.display_tag) s.display_tag = s.anchor_id_hex.slice(-4);
             return s;
         } catch (_) { return null; }
@@ -868,7 +1431,7 @@
     //   store = "pending", keyPath "token_hex"
     //   rec   = { token_hex, arg_hex, queued_at_ns, expires_at_ns, attempts }
     //
-    // The page writes the entry BEFORE the contract call so a page-close
+    // The page writes the entry BEFORE the canister call so a page-close
     // mid-revoke doesn't lose it; the Service Worker drains it with retry.
     const REVOKE_DB = "memphis-revoke-db";
     const REVOKE_DB_VERSION = 1;
@@ -948,13 +1511,13 @@
     }
 
     // Server-side revoke + localStorage clear. Idempotent: if no live session
-    // is stored, just clears localStorage and returns. If the contract call
+    // is stored, just clears localStorage and returns. If the canister call
     // fails (network, expired session, bad token), the local copy is still
     // cleared — leaving the UI signed out — and the revoke is durably queued
-    // (P1.1.6) so the Service Worker retries it until the contract confirms or
+    // (P1.1.6) so the Service Worker retries it until the canister confirms or
     // the token naturally expires.
     //
-    // Mirrors contracts/memphis/src/lib.rs:end_session, which is itself
+    // Mirrors canisters/memphis/src/lib.rs:end_session, which is itself
     // idempotent against unknown tokens (so re-issuing signOut is safe).
     async function signOut() {
         const s = loadSession();
@@ -976,7 +1539,90 @@
         }
     }
 
+
+    // Mint an ORIGIN-SCOPED credential from a master session.
+    //
+    // This is what an app is given. The master session token stays on the
+    // Memphis origin and is never handed out: a token bound to one origin is
+    // inert everywhere else, so an app cannot use it to authenticate as its own
+    // users at some other app.
+    //
+    // `ttlNs` defaults to the u64 maximum, which does NOT mean "forever" — the
+    // canister clamps to min(requested, its own ceiling, the parent's remaining
+    // life). Asking for the maximum is how to say "for as long as the session I
+    // came from lives" without this client knowing the canister's clock scaling.
+    async function issueScopedSession(sessionToken, origin, ttlNs) {
+        if (!origin) throw new Error("issueScopedSession: an origin is required");
+        const ttl = (ttlNs === undefined || ttlNs === null) ? 0xffffffffffffffffn : ttlNs;
+        const reply = await memphisCallAwait(
+            "issue_scoped_session", encScopedSessionArgs(sessionToken, origin, ttl));
+        const dec = decodeResultBlob(reply);
+        if (dec.err) {
+            const e = new Error("issue_scoped_session: " + (dec.err.message || dec.err.name));
+            e.code = dec.err.name;
+            throw e;
+        }
+        return { scoped_token: dec.ok, scoped_token_hex: bytesToHex(dec.ok) };
+    }
+
+    // ─── P4: staying signed in ─────────────────────────────────────────────
+    // A scoped session lasts 30 real minutes. A refresh credential lets the app
+    // mint a fresh one for weeks without another passkey ceremony, and is
+    // deliberately weak: pinned to this one origin, able to mint only short
+    // access tokens for it, and never a master session.
+    async function issueRefresh(sessionToken, origin) {
+        if (!origin) throw new Error("issueRefresh: an origin is required");
+        const reply = await memphisCallAwait(
+            "issue_refresh", encBlobTextArgs(sessionToken, origin));
+        const dec = decodeResultRecordFields(reply, [
+            ["refresh_token", "blob"],
+            ["expires_at_ns", "nat64"],
+            ["absolute_expires_at_ns", "nat64"],
+        ]);
+        if (dec.err) {
+            const e = new Error("issue_refresh: " + (dec.err.message || dec.err.name));
+            e.code = dec.err.name;
+            throw e;
+        }
+        return {
+            refresh_token_hex: bytesToHex(dec.ok.refresh_token),
+            expires_at_ns: dec.ok.expires_at_ns.toString(),
+            absolute_expires_at_ns: dec.ok.absolute_expires_at_ns.toString(),
+        };
+    }
+
+    // Rotate the chain one step. BOTH halves are new and the presented refresh
+    // token is dead the moment this returns, so a caller that stores only the
+    // access token has silently ended its own chain — store both or neither.
+    // Presenting a spent token again revokes the whole chain, by design: the
+    // only safe reading of a replay is that it was stolen.
+    async function exchangeRefresh(refreshToken, origin) {
+        if (!origin) throw new Error("exchangeRefresh: an origin is required");
+        const reply = await memphisCallAwait(
+            "exchange_refresh", encBlobTextArgs(refreshToken, origin));
+        const dec = decodeResultRecordFields(reply, [
+            ["session_token", "blob"],
+            ["expires_at_ns", "nat64"],
+            ["refresh_token", "blob"],
+            ["refresh_expires_at_ns", "nat64"],
+        ]);
+        if (dec.err) {
+            const e = new Error("exchange_refresh: " + (dec.err.message || dec.err.name));
+            e.code = dec.err.name;
+            throw e;
+        }
+        return {
+            scoped_token_hex: bytesToHex(dec.ok.session_token),
+            expires_at_ns: dec.ok.expires_at_ns.toString(),
+            refresh_token_hex: bytesToHex(dec.ok.refresh_token),
+            refresh_expires_at_ns: dec.ok.refresh_expires_at_ns.toString(),
+        };
+    }
+
     global.MemphisPasskey = {
+        issueRefresh,
+        exchangeRefresh,
+        issueScopedSession,
         register,
         signIn,
         signInOrRegister,
@@ -989,6 +1635,18 @@
         signOut,
         registerRevokeWorker,
         validateName,
+        // P2 — factor lifecycle (identity durability).
+        addDevice,
+        setupRecoveryPhrase,
+        signInWithRecoveryPhrase,
+        listFactors,
+        removeFactor,
+        cancelFactorRemoval,
+        // P2.4 — granular multi-factor signup ceremony pieces.
+        beginRegistrationChallenge,
+        buildDeviceFactor,
+        buildRecoveryFactor,
+        registerWithFactors,
         // Lower-level helpers, exposed for diagnostics.
         _memphisCallAwait: memphisCallAwait,
         _memphisQuery: memphisQuery,
