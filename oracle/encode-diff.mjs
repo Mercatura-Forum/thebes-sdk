@@ -115,19 +115,24 @@ function main() {
     console.log(`  [${tag}] ${k.padEnd(26)} ${shown}${ok ? '' : `  !=  ${b[k]}`}`)
   }
 
-  // Independently confirm the ONLY source drift is the transport envelope field.
+  // History: the two builds used to differ in exactly one place — the transport
+  // envelope field name (canonical `contract_id`, e-commerce `canister_id`) —
+  // and this check asserted the drift was that field and NOTHING else. The
+  // `runtime: key cluster API calls by canister_id` change then normalized the
+  // canonical build onto `canister_id`, which made the old expectation fail on
+  // every run since. The check's job now is to assert the convergence STAYS
+  // converged: both builds on `canister_id`, byte-identical throughout. A build
+  // that re-introduces `contract_id`, or diverges anywhere else, fails here.
   const canonSrc = readFileSync(join(ROOT, 'runtime/boundary.js'), 'utf8')
   const ecomSrc = readFileSync(join(ROOT, 'oracle/boundary.ecommerce.js'), 'utf8')
-  const canonField = canonSrc.includes('contract_id:Number(t)')
+  const canonField = canonSrc.includes('canister_id:Number(t)')
   const ecomField = ecomSrc.includes('canister_id:Number(t)')
-  // Strip the field-name difference; the rest of the source must be identical.
-  const norm = (s) => s.replace(/canister_id:Number\(t\)/g, 'contract_id:Number(t)')
-  const restIdentical = norm(canonSrc).trim() === norm(ecomSrc).trim()
+  const restIdentical = canonSrc.trim() === ecomSrc.trim()
 
   console.log('\n  Transport-envelope drift check:')
-  console.log(`  [${canonField ? '  ok ' : 'FAIL'}] canonical uses transport field  contract_id`)
+  console.log(`  [${canonField ? '  ok ' : 'FAIL'}] canonical uses transport field  canister_id`)
   console.log(`  [${ecomField ? '  ok ' : 'FAIL'}] e-commerce uses transport field canister_id`)
-  console.log(`  [${restIdentical ? '  ok ' : 'FAIL'}] sources identical apart from that field name`)
+  console.log(`  [${restIdentical ? '  ok ' : 'FAIL'}] sources are byte-identical (the old field drift is gone)`)
 
   const driftOk = canonField && ecomField && restIdentical
   if (!driftOk) fails++

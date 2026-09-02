@@ -41,7 +41,7 @@
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "oracle": "node oracle/encode-diff.mjs",
-    "test": "node oracle/encode-diff.mjs"
+    "test": "node oracle/encode-diff.mjs && node oracle/faults.mjs"
   },
   "peerDependencies": {
     "react": ">=18"
