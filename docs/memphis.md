@@ -381,6 +381,52 @@ Since 2026-08-29 an anchor is a **set of factors**, not a single passkey.
 > keep authenticating with what they have — a floor asserted at upgrade time
 > would trap the shared contract for everyone.
 
+### 6.1 Running a signup — the ceremony, and what happens if you don't
+
+`signInOrRegister()` and `register(name)` send **one** factor. Against cid 921
+that is refused before any crypto runs, with:
+
+```
+Err = InvariantViolation {
+  id      = "INV-MEM-1";
+  details = "registration provided 1 factor(s); a new identity requires at
+             least 3 distinct factors (e.g. a device passkey, a second device,
+             and a recovery phrase)";
+}
+```
+
+They are kept only for a canister that still accepts one factor. **Drive a new
+identity through the granular pieces instead:**
+
+```js
+const challenge = await pk.beginRegistrationChallenge()
+const f1 = await pk.buildDeviceFactor(challenge, handle)             // this device
+const f2 = await pk.buildDeviceFactor(challenge, handle + ' (backup)') // second passkey
+const f3 = await pk.buildRecoveryFactor(challenge, phrase)            // BIP-39 phrase
+const session = await pk.registerWithFactors(handle, [f1, f2, f3])
+```
+
+All three sign the **same** challenge, so the anchor is admitted in one atomic
+`register`. Two rules that are easy to get wrong:
+
+- **Load `recovery.js` next to `passkey.js`.** `buildRecoveryFactor` needs
+  `window.MemphisRecovery`; without it signup cannot complete. It is a
+  *registration* dependency, not an optional extra.
+- **Generate and confirm the phrase BEFORE the passkey prompts, and validate the
+  handle before either.** A rule applied after twelve words have been written
+  down voids those words for nothing — a cheap check placed behind an
+  irreversible step is worse than no check at all.
+
+React apps get this for free: `<MemphisGate>` runs the whole ceremony, renders
+the phrase overlay, and exposes `phrase` / `confirmPhrase` / `cancelPhrase` /
+`progress` on `useAuth()` if you want to render your own.
+
+**Reading errors.** Decode the **inner** `MemphisError` tag, not the outer
+`Result` tag. Candid orders variant fields by field-name *hash*, so an index into
+a declaration-ordered list is meaningless — a client that reported the outer tag
+printed `NotAuthenticated` for every failure, INV-MEM-1 included, and sent people
+looking at their authenticator instead of at the rule they had hit.
+
 ---
 
 ## 7. Sessions and the clock
