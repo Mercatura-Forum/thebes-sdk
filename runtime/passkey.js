@@ -23,7 +23,10 @@
  * REGISTRATION TAKES THREE FACTORS (MIN_FACTORS_AT_SIGNUP = 3 since
  * 2026-08-29): a device passkey, a second passkey, and a recovery phrase.
  * `register(name)` below sends ONE and is kept only for a canister that still
- * accepts that; against cid 921 it is refused with InsufficientFactors. Drive
+ * accepts that; against cid 921 it is refused by INV-MEM-1 with
+ * `InvariantViolation { id = "INV-MEM-1"; details = ... }` — NOT with
+ * InsufficientFactors, which is a different variant and is never what a
+ * short signup returns. Drive
  * a signup through beginRegistrationChallenge + buildDeviceFactor x2 +
  * buildRecoveryFactor + registerWithFactors, which is what the connect broker
  * and every current example do. `recovery.js` must be loaded alongside this
@@ -37,6 +40,52 @@
         ? ""
         : "https://memphis.mercaturaforum.com";
     const RP_ID = "memphis.mercaturaforum.com";
+
+    // ─── credential algorithms ─────────────────────────────────────────────
+    // The list offered to the authenticator is exactly what the canister
+    // verifies, read from its `algorithms()` query (ES256, EdDSA, RS256 in
+    // that order since the algorithm-coverage change). A canister without the
+    // query (an older build) verifies ES256 only, so the list falls back to
+    // ES256. Offering an algorithm the verifier cannot check would let an
+    // authenticator mint a credential that fails at the end of the ceremony.
+    const ALG_NAMES = { "-7": "ES256 (P-256)", "-8": "EdDSA (Ed25519)", "-257": "RS256 (RSA)" };
+    let algsPromise = null;
+    function supportedAlgorithms() {
+        if (algsPromise) return algsPromise;
+        algsPromise = (async function () {
+            try {
+                // Candid reply: DIDL header, one vec int64 argument.
+                const reply = await memphisQuery("algorithms", new Uint8Array([0x44, 0x49, 0x44, 0x4c, 0x00, 0x00]));
+                const u8 = reply instanceof Uint8Array ? reply : new Uint8Array(reply);
+                // Skip "DIDL", the type table (one vec of int64), the arg types; then the count.
+                let off = 4;
+                const [tcount, a1] = readUleb(u8, off); off = a1;
+                for (let i = 0; i < Number(tcount); i++) { const [, a2] = readSleb(u8, off); off = a2; const [, a3] = readSleb(u8, off); off = a3; }
+                const [acount, a4] = readUleb(u8, off); off = a4;
+                for (let i = 0; i < Number(acount); i++) { const [, a5] = readSleb(u8, off); off = a5; }
+                const [n, a6] = readUleb(u8, off); off = a6;
+                const out = [];
+                for (let i = 0; i < Number(n); i++) {
+                    let v = 0n;
+                    for (let b = 0; b < 8; b++) v |= BigInt(u8[off + b]) << BigInt(8 * b);
+                    if (v >= (1n << 63n)) v -= (1n << 64n);
+                    out.push(Number(v)); off += 8;
+                }
+                return out.length ? out : [-7];
+            } catch (_) {
+                return [-7];
+            }
+        })();
+        return algsPromise;
+    }
+    async function pubKeyCredParams() {
+        const algs = await supportedAlgorithms();
+        return algs.map(alg => ({ type: "public-key", alg }));
+    }
+    function unsupportedAuthenticatorMessage(algs) {
+        const names = algs.map(a => ALG_NAMES[String(a)] || String(a)).join(", ");
+        return "This authenticator could not create a passkey with any algorithm this service accepts (" + names + "). Use a phone, a platform passkey or a security key.";
+    }
 
     // ─── tiny utilities ────────────────────────────────────────────────────
     function bytesToHex(u8) {
@@ -756,7 +805,9 @@
         // "webauthn.get" assertion, which the canister's INV-MEM-7 REQUIRES
         // (clientDataJSON.type must be "webauthn.get" — see crates/memphis-webauthn
         // verify_assertion). Two user-presence prompts; works on every device.
-        const created = await navigator.credentials.create({
+        let created;
+        try {
+        created = await navigator.credentials.create({
             publicKey: {
                 challenge: challengeBytes,
                 rp: { id: RP_ID, name: "Memphis" },
@@ -765,7 +816,7 @@
                     name: displayName,
                     displayName: displayName,
                 },
-                pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+                pubKeyCredParams: await pubKeyCredParams(),
                 // residentKey — without it the minted credential is non-
                 // discoverable and signIn's get({allowCredentials: []}) cannot
                 // find it (2026-08-29 register-vs-signIn defect). "required" +
@@ -779,6 +830,10 @@
                 attestation: "none",
             },
         });
+        } catch (e) {
+            if (e && e.name === "NotSupportedError") throw new Error(unsupportedAuthenticatorMessage(await supportedAlgorithms()));
+            throw e;
+        }
         if (!created) throw new Error("navigator.credentials.create returned null");
         const credentialId = new Uint8Array(created.rawId);
         const attestationObject = new Uint8Array(created.response.attestationObject);
