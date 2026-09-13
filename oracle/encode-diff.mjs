@@ -115,19 +115,19 @@ function main() {
     console.log(`  [${tag}] ${k.padEnd(26)} ${shown}${ok ? '' : `  !=  ${b[k]}`}`)
   }
 
-  // Independently confirm the ONLY source drift is the transport envelope field.
+  // Independently confirm the two sources agree on the transport envelope
+  // field (canister_id, the cluster API's name for it) and are otherwise
+  // identical.
   const canonSrc = readFileSync(join(ROOT, 'runtime/boundary.js'), 'utf8')
   const ecomSrc = readFileSync(join(ROOT, 'oracle/boundary.ecommerce.js'), 'utf8')
-  const canonField = canonSrc.includes('contract_id:Number(t)')
+  const canonField = canonSrc.includes('canister_id:Number(t)') && !canonSrc.includes('contract_id:Number(t)')
   const ecomField = ecomSrc.includes('canister_id:Number(t)')
-  // Strip the field-name difference; the rest of the source must be identical.
-  const norm = (s) => s.replace(/canister_id:Number\(t\)/g, 'contract_id:Number(t)')
-  const restIdentical = norm(canonSrc).trim() === norm(ecomSrc).trim()
+  const restIdentical = canonSrc.trim() === ecomSrc.trim()
 
   console.log('\n  Transport-envelope drift check:')
-  console.log(`  [${canonField ? '  ok ' : 'FAIL'}] canonical uses transport field  contract_id`)
+  console.log(`  [${canonField ? '  ok ' : 'FAIL'}] canonical uses transport field  canister_id`)
   console.log(`  [${ecomField ? '  ok ' : 'FAIL'}] e-commerce uses transport field canister_id`)
-  console.log(`  [${restIdentical ? '  ok ' : 'FAIL'}] sources identical apart from that field name`)
+  console.log(`  [${restIdentical ? '  ok ' : 'FAIL'}] sources identical`)
 
   const driftOk = canonField && ecomField && restIdentical
   if (!driftOk) fails++
@@ -135,9 +135,7 @@ function main() {
   console.log('')
   if (fails === 0) {
     console.log('  ✓ PASS — Candid wire encoding/decoding is BYTE-IDENTICAL across both')
-    console.log('    builds. The sole difference is the transport envelope field name,')
-    console.log('    which is not part of the Candid payload. Adopting the SDK changes no')
-    console.log('    wire bytes and normalizes e-commerce onto the canonical field.\n')
+    console.log('    builds, and the two sources agree on the transport envelope.\n')
     process.exit(0)
   }
   console.log(`  ✗ FAIL — ${fails} divergence(s). This is a wire regression; do NOT ship.\n`)
