@@ -1,5 +1,5 @@
 /**
- * thebes.ts — a small TYPED wrapper over the proven `window.EgyptBoundary` SDK
+ * thebes.ts, a small TYPED wrapper over the proven `window.EgyptBoundary` SDK
  * (vendored as /boundary.js). It exposes exactly what an app needs:
  *   • query / update calls to a Motoko backend (Candid-encoded args)
  *   • raw-JSON calls to the Rust media contract (its methods take serde_json)
@@ -89,7 +89,7 @@ export const decodeVecRecord = (
 
 const enc = new TextEncoder()
 
-/** The media contract methods take raw JSON, NOT Candid — encode JSON → hex. */
+/** The media contract methods take raw JSON, NOT Candid, encode JSON → hex. */
 function jsonArgHex(obj: unknown): string {
   return boundary().bytesToHex(enc.encode(JSON.stringify(obj)))
 }
@@ -120,7 +120,7 @@ function toBase64(bytes: Uint8Array): string {
 /**
  * Upload bytes to the media contract via the chunked flow, returning the stored
  * path + metadata. The server transcodes images (pass-3) so the client only
- * needs to keep the upload under the class input cap — the caller can downscale
+ * needs to keep the upload under the class input cap, the caller can downscale
  * first via `downscaleImage`. `onProgress` reports 0..1 across stored chunks.
  */
 export async function uploadMedia(
@@ -158,7 +158,7 @@ export async function uploadMedia(
 
 /**
  * Client-side downscale + JPEG encode via <canvas> so the upload stays under the
- * class input cap (the contract also transcodes server-side — this just bounds
+ * class input cap (the contract also transcodes server-side, this just bounds
  * the bytes we send). Returns JPEG bytes + content type.
  */
 export async function downscaleImage(file: File, maxDim: number, quality = 0.85): Promise<{ bytes: Uint8Array; contentType: string }> {

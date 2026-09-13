@@ -1,11 +1,11 @@
 /**
- * MemphisConnectGate — the drop-in sign-in for an app served from ITS OWN domain.
+ * MemphisConnectGate, the drop-in sign-in for an app served from ITS OWN domain.
  *
  * The twin of <MemphisGate>. Same shape, same open-demo behaviour: it always
  * renders the app and exposes the session through useConnectAuth(), so visitors
  * roam freely and sign in on demand from the header chip.
  *
- * Use this one whenever your app is not served from the Memphis origin — which
+ * Use this one whenever your app is not served from the Memphis origin, which
  * is every app with a domain of its own. <MemphisGate> runs the passkey ceremony
  * in the page, and a page may only claim an RP ID that is a registrable-domain
  * suffix of its own origin, so on your domain the browser refuses it outright.
@@ -56,7 +56,7 @@ export function MemphisConnectGate({ app, children }: { app: string; children: R
  * the address bar shows them who is asking. Collecting it on the app's own page
  * teaches exactly the habit a phishing page needs.
  *
- * `mode` defaults to "auto" — a popup, falling back to a full-page redirect when
+ * `mode` defaults to "auto", a popup, falling back to a full-page redirect when
  * the browser blocks it. An in-app WebView (Instagram, LinkedIn) and iOS Safari
  * outside a gesture both block popups, and without the fallback those visitors
  * simply cannot sign in.

@@ -1,5 +1,5 @@
 /*
- * memphis-connect.js — sign a user in from an app on ITS OWN domain.
+ * memphis-connect.js, sign a user in from an app on ITS OWN domain.
  *
  *     <script src="./memphis-connect.js"><\/script>
  *
@@ -17,13 +17,13 @@
  * A WebAuthn credential is bound to a Relying Party ID, and a page may only
  * claim an RP ID that is a registrable-domain suffix of its own origin. Memphis
  * anchors live under one RP ID. So a page served from `my-app.com` physically
- * cannot run the Memphis passkey ceremony — the browser refuses before any of
+ * cannot run the Memphis passkey ceremony, the browser refuses before any of
  * our code runs. `passkey.js` works only on the Memphis origin itself.
  *
  * This module is the way across that wall. The ceremony happens in a window at
  * the Memphis origin; that window attenuates the master session into a token
  * minted for YOUR origin and hands back only that. Your app never sees a master
- * token, and nothing needs allowlisting — which is why this works for any number
+ * token, and nothing needs allowlisting, which is why this works for any number
  * of apps on any domain, including ones we have never heard of.
  *
  * This is the same shape as Internet Identity's per-frontend delegation and as
@@ -36,10 +36,10 @@
  * A page may LIE about its origin in the request. It gains nothing, because the
  * answer is delivered ONLY to the origin it claimed:
  *
- *   • popup mode    — `postMessage(payload, RETURN_TO)`, never `"*"`. The
+ *   • popup mode   , `postMessage(payload, RETURN_TO)`, never `"*"`. The
  *                     browser refuses delivery when the opener's real origin is
  *                     not RETURN_TO. The liar gets silence.
- *   • redirect mode — the browser is navigated to a return URL that must be
+ *   • redirect mode, the browser is navigated to a return URL that must be
  *                     same-origin as the claimed origin. The credential lands on
  *                     the victim's own page, where the liar cannot read it.
  *
@@ -51,7 +51,7 @@
  * ⚠️ In redirect mode the token arrives in the URL FRAGMENT, never the query
  * string, so it is not sent to your server and does not appear in a `Referer`
  * header or an access log. If your app has an open redirect, it can bounce that
- * fragment to an attacker — the same failure OAuth deployments have had for
+ * fragment to an attacker, the same failure OAuth deployments have had for
  * fifteen years. Validate your own return paths.
  */
 (function (global) {
@@ -121,7 +121,7 @@
   /**
    * Trade the stored refresh credential for a fresh access token, silently.
    *
-   * No window, no gesture, no passkey prompt — this is what "stay signed in for
+   * No window, no gesture, no passkey prompt, this is what "stay signed in for
    * a week" actually is. Returns the new session, or null when there is nothing
    * to renew from, in which case the caller should ask for a real sign-in.
    *
@@ -131,7 +131,7 @@
    * ⚠️ The old refresh token is dead the moment the exchange returns, and
    * presenting it again revokes the entire chain. So the new pair is persisted
    * before this resolves, and a failed write is treated as a failed renewal
-   * rather than being ignored — a chain we cannot record is a chain we have
+   * rather than being ignored, a chain we cannot record is a chain we have
    * already lost.
    */
   function renew(app) {
@@ -162,7 +162,7 @@
         return next;
       })
       .catch(function () {
-        // A refused exchange means the chain is gone — lapsed, revoked, or
+        // A refused exchange means the chain is gone, lapsed, revoked, or
         // revoked BECAUSE this token was replayed. Either way it will never
         // work again, so drop it rather than retrying into the same wall.
         clearSession(app);
@@ -177,7 +177,7 @@
   /**
    * Local sign-out: forget the scoped token held by THIS app.
    *
-   * It does not end the person's Memphis session — this app cannot, and should
+   * It does not end the person's Memphis session, this app cannot, and should
    * not be able to. `end_session` is caller-scoped on Memphis, so ending the
    * underlying session is the Memphis origin's job, reached through the connect
    * window. Signing out here means "this app forgets you", which is what an app
@@ -232,7 +232,7 @@
   /**
    * Navigate the top-level window to the connect page and come back.
    *
-   * Used when a popup is blocked — the common case inside an in-app browser
+   * Used when a popup is blocked, the common case inside an in-app browser
    * (Instagram, LinkedIn, a WebView) and under iOS Safari's stricter gesture
    * rules. This call does not return: the page is being navigated away. Call
    * `memphis.resume()` on load to collect the answer.
@@ -340,7 +340,7 @@
 
       function onMessage(ev) {
         // Two checks, both exact. The origin must be the Memphis origin the
-        // popup was opened at — never a prefix or suffix test — and the message
+        // popup was opened at, never a prefix or suffix test, and the message
         // must carry our marker and our app name, so a stray message from
         // another Memphis tab cannot resolve this call.
         if (ev.origin !== new URL(connectUrl).origin) return;

@@ -1,4 +1,4 @@
-# Memphis — the integration guide
+# Memphis: the integration guide
 
 Memphis (contract **921**) is the Thebes identity contract. It gives every person
 a passkey-backed *anchor*, and gives every application a **stable, per-app,
@@ -6,25 +6,25 @@ pseudonymous principal** derived from that anchor. The same human is the same
 principal in your app forever, and an unlinkable different principal in every
 other app.
 
-This is the canonical guide for both halves of the integration — the browser
+This is the canonical guide for both halves of the integration, the browser
 ceremony (`runtime/passkey.js`, `useMemphis`, `<MemphisGate>`) and the backend
 gate (`MemphisAuth` in [thebes-lib](https://github.com/Mercatura-Forum/thebes-lib)).
-Everything below is the *current* contract. Where a rule looks arbitrary, it is
-written down because getting it wrong cost us a day.
+Everything below is the *current* contract. Each rule is written down because
+the failure it prevents does not present as an authentication failure.
 
 ---
 
 ## 1. The three identifiers, and why confusing them breaks things
 
-Every Memphis bug we have shipped came from treating two of these as one.
+Treating any two of these as one is the most common integration error.
 
 | | What it is | Set where | If you change it |
 | --- | --- | --- | --- |
-| **`msg.caller`** | The *transport sender* — whatever key signed the request envelope. Authenticated by the boundary, but **not a person**. | The client's agent key | n/a — never key user data on this |
+| **`msg.caller`** | The *transport sender*, whatever key signed the request envelope. Authenticated by the boundary, but **not a person**. | The client's agent key | n/a, never key user data on this |
 | **`origin`** | Your **pseudonym namespace**. An arbitrary stable label; `"my-app"` is as valid as a URL. Feeds principal derivation. | `MemphisAuth.initFromCid(921, origin, version)` | **Every user's principal changes and their data is orphaned.** Never touch it on a live app. |
-| **`audience`** | The **web origin your app is served from** — `"https://my-app.com"`. Memphis compares it byte-exactly against the origin it minted the token for. | Per call: `verifyWithAudience(gate, token, audience)` | Harmless. It only says where tokens are accepted from. |
+| **`audience`** | The **web origin your app is served from**: `"https://my-app.com"`. Memphis compares it byte-exactly against the origin it minted the token for. | Per call: `verifyWithAudience(gate, token, audience)` | Harmless. It only says where tokens are accepted from. |
 
-`origin` and `audience` are frequently **not equal** — Thebes Hosting's namespace
+`origin` and `audience` are frequently **not equal**: Thebes Hosting's namespace
 is the literal string `"thebes-hosting"` while its audience is
 `"https://thebesprotocol.com"`. Present the namespace as the audience and every
 verification returns `#Unauthorized`; "fix" that by changing the namespace to the
@@ -68,7 +68,7 @@ It is correct **only** when your namespace already *is* the URL.
 
 **Why the master token never leaves the browser.** A master session token is
 anchor-scoped: whoever holds it *is* that user everywhere. Hand one to an app and
-that app can authenticate as its own users at every other Thebes app — the
+that app can authenticate as its own users at every other Thebes app, the
 confused deputy (Hardy, 1988). So the client sends a credential minted for one
 origin and refused at every other, the same shape as OAuth's `aud` claim
 (RFC 9068) and Internet Identity's per-frontend delegation. The scoped token is
@@ -83,7 +83,7 @@ that session is revoked, and it dies on sign-out-everywhere.
 import MemphisAuth "mo:thebes-lib/MemphisAuth";
 
 persistent actor MyApp {
-  // Pseudonym namespace — NEVER change this on a live app.
+  // Pseudonym namespace, NEVER change this on a live app.
   var gate = MemphisAuth.initFromCid(921, "my-app", 1);
 
   // The web origin this app is served from. A compile-time constant, not state.
@@ -92,7 +92,7 @@ persistent actor MyApp {
   public shared func myProfile(session : Blob) : async Result.Result<Profile, Text> {
     switch (await* MemphisAuth.verifyWithAudience(gate, session, AUDIENCE)) {
       case (#err(#Memphis(#Unauthorized))) { #err("Token was minted for another origin") };
-      case (#err(#Expired))                { #err("Session expired — sign in again") };
+      case (#err(#Expired))                { #err("Session expired, sign in again") };
       case (#err(e))                       { #err("Auth failed") };
       case (#ok(id))                       { #ok(loadProfile(id.principal)) };
     };
@@ -100,7 +100,7 @@ persistent actor MyApp {
 }
 ```
 
-### Rule 1 — `await*`, never `await`
+### Rule 1: `await*`, never `await`
 
 `verify` and `verifyWithAudience` are **`async*`**. A module-level `async` helper
 that awaits another contract loses the caller's continuation: the engine replies
@@ -108,34 +108,34 @@ with the *inner* awaited value instead of your handler's own return, and any sta
 mutation after the await is dropped.
 
 The symptom does not look like an auth bug. It looks like a client-side Candid
-decode error naming a field your method never declared — because the client is
+decode error naming a field your method never declared, because the client is
 decoding `Result<Identity, AuthError>` instead of your return type.
 
 > **The diagnostic that isolates it in one step:** call an update that makes *no*
 > inter-contract call, and one that does. If the first returns its declared type
-> and the second returns the callee's, this is your bug. Anything else is a red
+> and the second returns the callee's, this is the cause. Anything else is a red
 > herring.
 
-### Rule 2 — bind the `_u` methods, never the `query` ones
+### Rule 2: bind the `_u` methods, never the `query` ones
 
 Memphis exports each resolution method twice, with identical bodies:
 
 | For the browser (cheap, non-replicated) | For a contract |
 | --- | --- |
-| `whoami`, `whoami_scoped` — `query` | `whoami_u`, **`whoami_scoped_u`** — update |
-| `derive_principal_for` — `query` | **`derive_principal_for_u`** — update |
+| `whoami`, `whoami_scoped`: `query` | `whoami_u`, **`whoami_scoped_u`**: update |
+| `derive_principal_for`: `query` | **`derive_principal_for_u`**: update |
 
 A contract-to-contract `await` on a **query** export gets no reply on this
 substrate; the call fails as `method 'canister_update <name>' not found`.
 
 > ⚠️ Probing the query form over the boundary's `POST /api/query` **succeeds**,
 > which is exactly what makes a wrong binding look correct. That path exercises
-> the callee's query entry point — not the path a contract takes.
+> the callee's query entry point, not the path a contract takes.
 
-### Rule 3 — the audience is an argument, not state
+### Rule 3: the audience is an argument, not state
 
 There is deliberately no `initWithAudience`. Adding a field to a stable record
-hits **M0170** (incompatible stable variable — `?Text` does not help, Motoko
+hits **M0170** (incompatible stable variable, `?Text` does not help, Motoko
 rejects an added record field either way), and marking the holder `transient` to
 dodge that hits **M0169** (a stable variable cannot be implicitly discarded).
 Both walls exist for a value that never needed to persist.
@@ -159,7 +159,7 @@ you want the hygiene.
 A WebAuthn credential is bound to a **Relying Party ID**, and a page may only
 claim an RP ID that is a registrable-domain suffix of its own origin. Memphis
 anchors live under one RP ID. So a page served from `my-app.com` **physically
-cannot** run the Memphis passkey ceremony — the browser refuses before any of our
+cannot** run the Memphis passkey ceremony, the browser refuses before any application
 code runs.
 
 | Your app is served from | Use | Runtime |
@@ -187,10 +187,10 @@ await update(CID, 'myProfile', encodeArgs([{ type: 'blob', value: auth.token }])
 The ceremony happens in a window at the Memphis origin. That window holds the
 master session, exchanges it for a token minted **for your origin**, and hands
 back only that. Your app never sees a master token, and nothing needs
-allowlisting — which is why it works for any domain, including ones we have never
-heard of. It is the same shape as Internet Identity's per-frontend delegation.
+allowlisting, which is why it works for any domain, including ones the identity
+contract has never seen. It is the same shape as Internet Identity's per-frontend delegation.
 
-**`mode`**: `"popup"` (default), `"redirect"`, or `"auto"` — a popup that falls
+**`mode`**: `"popup"` (default), `"redirect"`, or `"auto"`: a popup that falls
 back to a full-page redirect when the browser blocks it. Use `"auto"` in
 production: an in-app WebView (Instagram, LinkedIn) and iOS Safari outside a
 gesture will block a popup, and without the fallback those users simply cannot
@@ -200,7 +200,7 @@ yourself on load.
 
 **Call `signIn` from a user gesture.** A popup opened outside one is blocked, and
 a redirect outside one is a navigation the person did not ask for. Do not `await`
-anything before it — an await ends the gesture, and this is the single most common
+anything before it, an await ends the gesture, and this is the single most common
 way a working implementation stops working on iPhone.
 
 ### Holding the session, on any stack
@@ -212,7 +212,7 @@ session through it rather than reaching into `window.memphis`:
 import { getSession, signIn, signOut, resumeFromRedirect, onSessionChange } from '@thebes/sdk/session'
 ```
 
-It enforces four rules that are each a bug we actually shipped:
+It enforces four rules:
 
 - **One session per origin**, keyed by origin and app name. Thebes Hosting kept
   one per page: `signup.html` held the token in a local variable and never wrote
@@ -221,20 +221,20 @@ It enforces four rules that are each a bug we actually shipped:
   same key while connecting under *different* app names, so each sign-in logged
   the other out.
 - **The expiry travels with the token.** Without it, a dead session is only
-  discovered by making a call and watching it fail — indistinguishable from the
+  discovered by making a call and watching it fail, indistinguishable from the
   network being down, which is why it presented as "it just sends me back to
   sign in".
 - **A redirect return is collected first**, and the fragment stripped, so a
   token is never left in the address bar.
 - **Sign-out is local.** It forgets the token this site holds. It does not end
-  the person's Memphis session — `end_session` is caller-scoped, so only the
+  the person's Memphis session, `end_session` is caller-scoped, so only the
   Memphis origin can, which is the correct boundary.
 
 `onSessionChange(app, cb)` fires when another tab signs in or out, so a tab does
 not carry on holding a token that has been forgotten elsewhere.
 
 Adopting it on a site that already has sessions? Pass `LegacySessionKey`
-entries and the old records are read once and carried over — otherwise shipping
+entries and the old records are read once and carried over, otherwise shipping
 the shared store is itself an outage for everyone currently signed in.
 
 ### The security property, and how to not break it
@@ -242,22 +242,22 @@ the shared store is itself an outage for everyone currently signed in.
 A page may **lie** about its origin in the request. It gains nothing, because the
 answer is delivered only to the origin it claimed:
 
-- **popup** — `postMessage(payload, RETURN_TO)`, never `"*"`. The browser refuses
+- **popup**: `postMessage(payload, RETURN_TO)`, never `"*"`. The browser refuses
   delivery when the opener's real origin is not `RETURN_TO`. The liar gets silence.
-- **redirect** — the return URL must be same-origin with the claimed origin, so
+- **redirect**: the return URL must be same-origin with the claimed origin, so
   the credential lands on the victim's own page where the liar cannot read it.
 
 Both are the browser's to enforce, which is what makes them worth relying on.
 Widening the target origin to `"*"`, or accepting a return URL on a different
 origin than the claimed one, removes the only thing protecting every app on the
-chain. This is tested rather than believed — `e2e_origin_lie.py`, with an
+chain. This is tested rather than believed, `e2e_origin_lie.py`, with an
 anti-vacuity control proving the ceremony actually ran before the attacker got
 nothing.
 
 > The redirect token arrives in the URL **fragment**, never the query string, so
 > it is not sent to your server and does not appear in a `Referer` header or an
 > access log. If your app has an open redirect it can bounce that fragment to an
-> attacker — the same failure OAuth deployments have had for fifteen years.
+> attacker, the same failure OAuth deployments have had for fifteen years.
 > Validate your own return paths.
 
 ### If you are on the Memphis origin
@@ -276,7 +276,7 @@ Three things in `runtime/passkey.js` are load-bearing.
 `navigator.credentials.get` with `allowCredentials: []` so the authenticator
 surfaces every credential it holds for the relying party. An authenticator only
 surfaces credentials it can *discover*, and WebAuthn's default when `residentKey`
-is unspecified is a **non-discoverable** credential — so registration would mint
+is unspecified is a **non-discoverable** credential, so registration would mint
 exactly the kind of credential sign-in cannot find. Registration must pass:
 
 ```js
@@ -291,14 +291,14 @@ This works today on Touch ID, Windows Hello, iCloud Keychain and Google Password
 Manager *even without it*, because those create discoverable credentials for
 platform attachment regardless of the request. On a roaming security key, or a
 browser that follows the spec literally, the person registers successfully and
-can then never sign in again — and the only symptom is a sentence about the
+can then never sign in again, and the only symptom is a sentence about the
 device not confirming the passkey, which points at their hardware rather than at
 you.
 
 **A lookup miss is a question, not a licence to mint.** `signInOrRegister` raises
 `NameNotRegistered` rather than silently creating an identity; creation happens
 only on an explicit `{ confirmCreate: true }`. A typo'd handle must not quietly
-become a second, empty account — the person's real account still exists and they
+become a second, empty account, the person's real account still exists and they
 cannot find it. `useMemphis` prompts and retries; if you drive `passkey.js`
 directly, you own that prompt.
 
@@ -316,7 +316,7 @@ Read the response as text first and report the status.
 ## 5. Staying signed in
 
 An access token lasts 30 real minutes. On its own that means signing in again
-several times a day — and since registration became a three-factor ceremony,
+several times a day, and since registration became a three-factor ceremony,
 "again" is expensive.
 
 So a sign-in also returns a **refresh credential**: long-lived, but deliberately
@@ -354,7 +354,7 @@ Sign-out-everywhere still works: a chain records the anchor epoch it began at, s
 `revoke_all_sessions_for_anchor` kills every chain for that person.
 
 Silent renewal needs `passkey.js` loaded alongside `memphis-connect.js`, because
-that is where the Memphis transport lives. Without it, sign-in still works — it
+that is where the Memphis transport lives. Without it, sign-in still works, it
 just stops being durable, which is the right way round for a missing script.
 
 ---
@@ -372,16 +372,16 @@ Since 2026-08-29 an anchor is a **set of factors**, not a single passkey.
   `removal_effective_at_ns`; **`cancel_factor_removal`** is the owner's veto. The
   last remaining factor is irremovable. The delay is what turns a stolen device
   into a recoverable incident rather than an eviction.
-- **Recovery phrase** — a BIP-39 phrase is a first-class factor
+- **Recovery phrase**: a BIP-39 phrase is a first-class factor
   (`FactorKind = RecoveryPhrase`), so an account survives losing every device.
 - **`list_factors`** enumerates the calling session's factors; build your
   "Security & recovery" screen on it.
 
 > The 3-factor floor binds **at registration only**. Anchors created before it
-> keep authenticating with what they have — a floor asserted at upgrade time
+> keep authenticating with what they have, a floor asserted at upgrade time
 > would trap the shared contract for everyone.
 
-### 6.1 Running a signup — the ceremony, and what happens if you don't
+### 6.1 Running a signup: the ceremony, and what happens if you don't
 
 `signInOrRegister()` and `register(name)` send **one** factor. Against cid 921
 that is refused before any crypto runs, with:
@@ -414,7 +414,7 @@ All three sign the **same** challenge, so the anchor is admitted in one atomic
   *registration* dependency, not an optional extra.
 - **Generate and confirm the phrase BEFORE the passkey prompts, and validate the
   handle before either.** A rule applied after twelve words have been written
-  down voids those words for nothing — a cheap check placed behind an
+  down voids those words for nothing, a cheap check placed behind an
   irreversible step is worse than no check at all.
 
 React apps get this for free: `<MemphisGate>` runs the whole ceremony, renders
@@ -423,9 +423,9 @@ the phrase overlay, and exposes `phrase` / `confirmPhrase` / `cancelPhrase` /
 
 **Reading errors.** Decode the **inner** `MemphisError` tag, not the outer
 `Result` tag. Candid orders variant fields by field-name *hash*, so an index into
-a declaration-ordered list is meaningless — a client that reported the outer tag
-printed `NotAuthenticated` for every failure, INV-MEM-1 included, and sent people
-looking at their authenticator instead of at the rule they had hit.
+a declaration-ordered list is meaningless, a client that reports the outer tag
+prints `NotAuthenticated` for every failure, INV-MEM-1 included, and points the
+user at the authenticator instead of at the rule that refused the request.
 
 ---
 
@@ -433,7 +433,7 @@ looking at their authenticator instead of at the rule they had hit.
 
 Memphis TTLs are written against the substrate clock, which runs at
 `CANISTER_SECONDS_PER_REAL_SECOND = 13`. The constants therefore read as
-`30 * 60 * 13 * 1_000_000_000` — that is **30 real minutes**, not 6.5 hours. Do
+`30 * 60 * 13 * 1_000_000_000`: that is **30 real minutes**, not 6.5 hours. Do
 not "simplify" that factor out, and do not compute your own expiry against
 `Time.now()` without it.
 
@@ -450,10 +450,10 @@ boundary. It is not the same clock and the two must not be merged.
 | `@thebes/sdk` | current tag | Needs the `/api/v1/canister/` route, `residentKey: "required"`, and confirm-before-mint. |
 
 Example repositories vendor a snapshot of both under `motoko/thebes-lib` and
-`frontend/vendor/@thebes/sdk`. A snapshot is frozen at the moment it was taken —
+`frontend/vendor/@thebes/sdk`. A snapshot is frozen at the moment it was taken,
 when a shared library misbehaves, **diff it against the copy a working production
-app uses**, not against the newest tag. Both times this bit us, the published
-copy was the stale one and a product tree held the fix.
+app uses**, not against the newest tag; a published copy can be older than a
+product tree.
 
 ---
 
@@ -466,9 +466,9 @@ copy was the stale one and a product tree held the fix.
 - [ ] A lookup miss asks before it creates.
 - [ ] The passkey client calls `/api/v1/canister/<cid>/query`.
 - [ ] `#Unauthorized` is surfaced to the user as *"signed in for another site"*,
-      not as a generic failure — it is the single most common misconfiguration.
+      not as a generic failure, it is the single most common misconfiguration.
 - [ ] Sessions are read with `ensureSession`, not `getSession`, wherever an
-      await is possible — otherwise nobody stays signed in.
+      await is possible, otherwise nobody stays signed in.
 - [ ] `passkey.js` is loaded alongside `memphis-connect.js` on any page that
       should renew silently.
 - [ ] A "Security & recovery" screen exists: list factors, add, remove (with the

@@ -1,4 +1,4 @@
-# AGENTS.md — working on the Thebes SDK
+# AGENTS.md: working on the Thebes SDK
 
 Orientation for an automated agent landing in `thebes-sdk`, the shared frontend
 toolkit for Thebes applications. Human-readable detail in [README.md](README.md).
@@ -19,14 +19,14 @@ dist/                  build output (tsc)
 ## How it is consumed
 
 Two ways: as a **pinned npm git dependency**
-(`"@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.1.1"`) or — in every
-`thebes-example-*` repository — as a **vendored snapshot** under
+(`"@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.1.1"`) or, in every
+`thebes-example-*` repository, as a **vendored snapshot** under
 `frontend/vendor/@thebes/sdk`. This repo is the upstream source of truth;
 never patch a vendored copy in an example.
 
 ## Conventions that bite (respect these when editing)
 
-- The boundary decodes `vec record` of scalars — single records travel as
+- The boundary decodes `vec record` of scalars, single records travel as
   0-or-1-element arrays, never bare options; scalars as `[{ field = text }]`.
 - Principals are 56-char hex everywhere (`identity()`, `decodeVecRecord`,
   `encodeArg({type:'principal'})`).

@@ -1,5 +1,5 @@
 /**
- * useMemphis — Memphis passkey sign-in as the app's web auth, over the proven
+ * useMemphis, Memphis passkey sign-in as the app's web auth, over the proven
  * `window.MemphisPasskey` client (vendored passkey.js). This is the reusable
  * pattern for every Thebes example: sign in with a passkey → a session with a
  * stable Memphis identity (anchor + display name) → use the display name (and,
@@ -57,7 +57,7 @@ export interface MemphisAuth {
   /** The twelve recovery words, while a signup is waiting for the person to
    *  confirm they have written them down. Null at every other moment. */
   phrase: string | null
-  /** They wrote it down — continue the ceremony. */
+  /** They wrote it down, continue the ceremony. */
   confirmPhrase: () => void
   /** Abort. Nothing has been created, so nothing needs undoing. */
   cancelPhrase: () => void
@@ -82,7 +82,7 @@ export function useMemphis(): MemphisAuth {
   const cancelPhrase = useCallback(() => { phraseAnswer.current?.(false) }, [])
 
   // A new identity needs THREE factors (Memphis INV-MEM-1, MIN_FACTORS_AT_SIGNUP
-  // = 3 since 2026-08-29): this device's passkey, a second passkey, and a
+  // = 3): this device's passkey, a second passkey, and a
   // recovery-phrase key. All three sign the SAME registration challenge, so
   // they land as one atomic `register`.
   //
@@ -91,7 +91,7 @@ export function useMemphis(): MemphisAuth {
   // ceremony abandoned at this step leaves no identity behind.
   const runCeremony = useCallback(async (p: Passkey, name: string): Promise<MemphisSession> => {
     const rec = recovery()
-    setProgress('A new identity needs three factors — passkey, second passkey, recovery phrase.')
+    setProgress('A new identity needs three factors, passkey, second passkey, recovery phrase.')
     const words = await rec.generatePhrase()
 
     const wrote = await new Promise<boolean>((resolve) => {
@@ -101,17 +101,17 @@ export function useMemphis(): MemphisAuth {
     phraseAnswer.current = null
     setPhrase(null)
     if (!wrote) {
-      const e = new Error('Registration cancelled — nothing was created.') as Error & { code?: string }
+      const e = new Error('Registration cancelled, nothing was created.') as Error & { code?: string }
       e.code = 'CANCELLED'
       throw e
     }
 
     const challenge = await p.beginRegistrationChallenge()
-    setProgress('Factor 1 of 3 — this device’s passkey…')
+    setProgress('Factor 1 of 3, this device’s passkey…')
     const f1 = await p.buildDeviceFactor(challenge, name)
-    setProgress('Factor 2 of 3 — a second passkey…')
+    setProgress('Factor 2 of 3, a second passkey…')
     const f2 = await p.buildDeviceFactor(challenge, `${name} (backup)`)
-    setProgress('Factor 3 of 3 — your recovery phrase…')
+    setProgress('Factor 3 of 3, your recovery phrase…')
     const f3 = await p.buildRecoveryFactor(challenge, words)
     setProgress('Creating your identity on-chain…')
     return await p.registerWithFactors(name, [f1, f2, f3])
@@ -123,7 +123,7 @@ export function useMemphis(): MemphisAuth {
       const p = pk()
       // Branch on the anchor lookup, which the canister answers directly.
       // Identity-durability P0: a lookup miss is a QUESTION for the human, not
-      // a license to mint — and a sign-in must never fall through into creating
+      // a license to mint, and a sign-in must never fall through into creating
       // a second identity for a name that already exists.
       const existing = await p.lookupAnchor(name)
       if (existing) { setSession(await p.signIn(name)); return }
@@ -133,18 +133,18 @@ export function useMemphis(): MemphisAuth {
           'Create a NEW identity with this name? It takes three factors: a passkey on ' +
           'this device, a second passkey, and a recovery phrase you write down.\n\n' +
           '(Cancel if you meant to sign into an existing one.)')
-      if (!ok) { setError('Sign-in cancelled — no identity created.'); return }
+      if (!ok) { setError('Sign-in cancelled, no identity created.'); return }
 
       setSession(await runCeremony(p, name))
     } catch (e) {
       const code = (e as { code?: string } | null)?.code
-      if (code === 'CANCELLED') { setError('Registration cancelled — nothing was created.'); return }
+      if (code === 'CANCELLED') { setError('Registration cancelled, nothing was created.'); return }
       // Say what the canister said. The earlier client passed the OUTER Result
       // tag to its error decoder, so every failure read "NotAuthenticated" and
       // sent people looking at their passkey instead of at the rule they hit.
       const msg = e instanceof Error ? e.message : String(e)
       const detail = (e as { detail?: string } | null)?.detail
-      setError(detail && detail !== msg ? `${msg} — ${detail}` : msg)
+      setError(detail && detail !== msg ? `${msg}, ${detail}` : msg)
       throw e
     } finally {
       // A ceremony that threw mid-flight must not leave the phrase panel up.

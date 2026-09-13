@@ -1,5 +1,5 @@
 /**
- * session — the Memphis session, for any site, with or without a framework.
+ * session, the Memphis session, for any site, with or without a framework.
  *
  * `useMemphisConnect` is the React face of this file. This is the one underneath
  * it: plain TypeScript, no React import, usable from a static page, a Vue or
@@ -16,9 +16,9 @@
  * `admin.html` each kept their own copy under the same storage key while
  * connecting under DIFFERENT app names, so each one's sign-in logged the other
  * out. No expiry was stored, so a dead session was only discovered by making a
- * call and watching it fail — indistinguishable from the network being down.
+ * call and watching it fail, indistinguishable from the network being down.
  *
- * Every one of those is a bug about session bookkeeping, not about identity, and
+ * Every one of those is a session-bookkeeping error, not an identity error, and
  * every site that rolls its own will write them again. Hence this file.
  *
  * ────────────────────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  *   • ONE session per origin. Keyed by origin and app name, so two pages of the
  *     same site always agree and two different sites never collide.
- *   • The expiry travels with the token, and a passed expiry is a local miss —
+ *   • The expiry travels with the token, and a passed expiry is a local miss,
  *     no round trip, and the person is told their session ended rather than
  *     being silently returned to a sign-in screen.
  *   • A redirect-mode return is collected before anything else, and the URL
@@ -122,8 +122,8 @@ export function getSession(app: string, legacy: LegacySessionKey[] = []): Connec
       const adopted = l.adopt(raw)
       if (!adopted?.token) continue
       const s: ConnectSession = { ...adopted, app, origin: globalThis.location?.origin ?? '' }
-      // An old record may carry no expiry at all. Returning it is right — it is
-      // the session the person actually has — and the first failed call clears
+      // An old record may carry no expiry at all. Returning it is right, it is
+      // the session the person actually has, and the first failed call clears
       // it like any other, at which point the shared store takes over.
       if (adopted.expiresAtMs && adopted.expiresAtMs <= Date.now()) continue
       return s
@@ -150,7 +150,7 @@ export function resumeFromRedirect(): ConnectSession | null {
 /**
  * Sign in, returning an origin-scoped session for this app.
  *
- * MUST be called inside a user gesture — a popup opened outside one is blocked,
+ * MUST be called inside a user gesture, a popup opened outside one is blocked,
  * and a redirect outside one is a navigation the person did not ask for. Do not
  * `await` anything before it: an await ends the gesture, which is the most
  * common way this stops working on iPhone.
@@ -167,7 +167,7 @@ export function signIn(app: string, opts: ConnectOptions = {}): Promise<ConnectS
 /**
  * Forget the token this site holds, and any legacy copy of it.
  *
- * Local only. It does not end the person's Memphis session — `end_session` is
+ * Local only. It does not end the person's Memphis session, `end_session` is
  * caller-scoped on Memphis, so only the Memphis origin can do that, which is
  * the correct boundary.
  */
@@ -184,7 +184,7 @@ export function signOut(app: string, legacy: LegacySessionKey[] = []): void {
  * This is the call that keeps someone signed in for weeks. An access token is
  * good for 30 minutes; the refresh credential behind it is good for far longer,
  * and exchanging it needs no window, no gesture and no passkey prompt. Prefer
- * this over `getSession` anywhere an await is possible — `getSession` is the
+ * this over `getSession` anywhere an await is possible, `getSession` is the
  * synchronous best-effort view, this is the truthful one.
  *
  * Returns null only when there is genuinely nothing left, at which point the
@@ -192,7 +192,7 @@ export function signOut(app: string, legacy: LegacySessionKey[] = []): void {
  *
  * Silent renewal additionally needs `passkey.js` loaded, since it owns the
  * Memphis transport. Without it this degrades to `getSession` rather than
- * failing — sign-in still works, it just stops being durable.
+ * failing, sign-in still works, it just stops being durable.
  */
 export async function ensureSession(
   app: string,

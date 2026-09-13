@@ -1,10 +1,10 @@
-// recovery.js — Memphis recovery-phrase factor (identity durability).
+// recovery.js, Memphis recovery-phrase factor (identity durability).
 //
 // A recovery phrase is a BIP39 mnemonic whose derived P-256 key is registered
 // as a StoredFactor of kind RecoveryPhrase. Sign-in with the phrase rebuilds
 // the SAME key and produces the same WebAuthn-shaped assertion envelope a
 // platform authenticator would, so the canister's INV-MEM-7 verification is
-// identical for both — no server-side special case, zero devices required.
+// identical for both, no server-side special case, zero devices required.
 //
 // Everything here is client-side and deterministic:
 //   phrase --PBKDF2-SHA512("mnemonic",2048)--> 64B seed        (BIP39 §"From
@@ -13,7 +13,7 @@
 //   credential_id = SHA-256("MEMPHIS-RECOVERY-CRED-V1"||x||y)[0..16]
 //
 // The EC math is plain-BigInt P-256 (SEC2 curve params; Jacobian
-// double-and-add; deterministic k per RFC 6979's core idea — k derived from
+// double-and-add; deterministic k per RFC 6979's core idea, k derived from
 // (priv, msg-hash) so no RNG failure can leak the key; low-s normalized DER).
 // Hashing and PBKDF2 come from WebCrypto. Verified against node:crypto ECDSA
 // and the canister's own verifier in the identity-durability test rig.
@@ -185,7 +185,7 @@
 
         async function sign(messageBytes) {
             var z = bytesToBig(await sha256(messageBytes));
-            // Deterministic k from (priv, hash) — RFC 6979's core property:
+            // Deterministic k from (priv, hash), RFC 6979's core property:
             // no RNG involved, same message+key -> same k, distinct messages
             // -> unrelated k. Loop on the negligible zero cases.
             var ctr = 0;

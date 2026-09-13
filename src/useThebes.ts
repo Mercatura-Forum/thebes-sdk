@@ -1,9 +1,9 @@
 /**
- * useThebes — React hooks over the typed `thebes` SDK. These are the idiomatic
+ * useThebes, React hooks over the typed `thebes` SDK. These are the idiomatic
  * data-access primitives every Thebes example reuses:
- *   • useQuery  — read a contract query, with loading/error/refetch
- *   • useUpdate — run an update call, tracking pending/error
- *   • useMediaUpload — downscale + chunked-upload an image, with progress
+ *   • useQuery , read a contract query, with loading/error/refetch
+ *   • useUpdate, run an update call, tracking pending/error
+ *   • useMediaUpload, downscale + chunked-upload an image, with progress
  *
  * They follow React best practices: stable callbacks (useCallback), abortable
  * effects, no state updates after unmount, and explicit dependency arrays.

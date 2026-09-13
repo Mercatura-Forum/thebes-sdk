@@ -1,11 +1,11 @@
 /**
- * MemphisGate — Memphis passkey sign-in as the app's web auth, open-demo style.
+ * MemphisGate, Memphis passkey sign-in as the app's web auth, open-demo style.
  *
  * Wrap the app's routes in <MemphisGate>. The gate ALWAYS renders the app and
  * exposes the session via useAuth(), so visitors roam freely and sign in on
  * demand from the header chip. Memphis (cid 921) provides the human identity +
  * display name; the on-chain caller stays the boundary's persisted browser key,
- * so reads — and demo writes — work whether or not you have signed in.
+ * so reads, and demo writes, work whether or not you have signed in.
  *
  * IMPORT this from '@thebes/sdk'; do NOT copy it into an app. Five examples
  * (chat, booking, restaurant, crm, cards) kept a local fork of this file, and
@@ -46,7 +46,7 @@ export function MemphisGate({ children }: { appName?: string; tagline?: string; 
  *
  *  Memphis needs three factors to create an identity (INV-MEM-1): a device
  *  passkey, a second passkey, and this phrase. It is shown BEFORE any passkey
- *  prompt, because it is the one factor a person has to transcribe — and it is
+ *  prompt, because it is the one factor a person has to transcribe, and it is
  *  rendered by the gate rather than the chip so that it is a full overlay, not
  *  a dropdown that a short viewport can push Continue out of.
  *
@@ -55,8 +55,8 @@ export function MemphisGate({ children }: { appName?: string; tagline?: string; 
  *
  *  EXPORTED, and takes `auth` explicitly, because several examples wrap the app
  *  in their OWN gate with their OWN context rather than this one. Such a gate
- *  gets the fixed `useMemphis()` — which suspends the ceremony until
- *  `confirmPhrase()` — but renders no overlay, so signup hangs on a
+ *  gets the fixed `useMemphis()`: which suspends the ceremony until
+ *  `confirmPhrase()`: but renders no overlay, so signup hangs on a
  *  confirmation the UI never shows. Those gates render this panel directly and
  *  pass their own `auth`; the context fallback keeps <MemphisGate> unchanged. */
 export function RecoveryPhrasePanel({ auth: authProp }: { auth?: MemphisAuth } = {}) {
@@ -120,7 +120,7 @@ export function SignOutChip({ className = '' }: { className?: string }) {
     )
   }
 
-  // Memphis handles look like  <stem>.thebes  — we append ".thebes" so a visitor
+  // Memphis handles look like  <stem>.thebes , we append ".thebes" so a visitor
   // only types the stem (3–32 chars, a–z 0–9 -). No bare fallback: an invalid
   // stem keeps the button disabled instead of failing with a cryptic error.
   const stem = name.trim().toLowerCase().replace(/\.thebes$/, '')
@@ -153,7 +153,7 @@ export function SignOutChip({ className = '' }: { className?: string }) {
       <span style={{ fontSize: '11px', opacity: 0.7 }}>
         {auth.progress
           ? auth.progress
-          : <>{stem ? <>→ becomes <b>{handle}</b></> : 'pick a handle — we add .thebes'} · 3–32 · a–z 0–9 -</>}
+          : <>{stem ? <>→ becomes <b>{handle}</b></> : 'pick a handle, we add .thebes'} · 3–32 · a–z 0–9 -</>}
       </span>
       {auth.error && <span className="max-w-[10rem] truncate text-red-600" title={auth.error}>{auth.error}</span>}
     </span>

@@ -1,18 +1,18 @@
 /**
- * oracle/encode-diff.mjs — wire-output equivalence oracle for the boundary client.
+ * oracle/encode-diff.mjs, wire-output equivalence oracle for the boundary client.
  *
  * The whole point of extracting one shared boundary.js is that no example's
  * on-the-wire bytes may change when it switches from its vendored copy to the
  * SDK. This oracle loads TWO boundary.js builds side by side:
  *
- *   • runtime/boundary.js          — the canonical SDK copy (what 9 examples use)
- *   • oracle/boundary.ecommerce.js — e-commerce's drifted copy (different hash)
+ *   • runtime/boundary.js         , the canonical SDK copy (what 9 examples use)
+ *   • oracle/boundary.ecommerce.js, e-commerce's drifted copy (different hash)
  *
  * and runs the SAME battery of inputs through each, asserting that every
  * Candid-encoded argument and every decoded reply is BYTE-IDENTICAL across the
  * two. It then independently confirms the ONLY source-level difference is the
- * transport envelope field name (contract_id vs canister_id) — a request-shape
- * field, NOT part of the Candid wire payload — so adopting the SDK changes zero
+ * transport envelope field name (contract_id vs canister_id), a request-shape
+ * field, NOT part of the Candid wire payload, so adopting the SDK changes zero
  * encoding behaviour and merely normalizes e-commerce onto the current field.
  *
  * Exit non-zero on ANY encoding/decoding divergence (a real regression) or if
@@ -73,7 +73,7 @@ function battery(B) {
     'encodeArgs/bools': () => hex(B.encodeArgs([true, false])),
     'encodeArgs/vec-nat': () =>
       hex(B.encodeArgs([{ type: 'vec', inner: { type: 'nat' }, value: [0n, 1n, 2n, 3n] }])),
-    // placeOrder(ids, qtys) — the exact shape the storefront sends
+    // placeOrder(ids, qtys), the exact shape the storefront sends
     'encodeArgs/placeOrder': () =>
       hex(
         B.encodeArgs([
@@ -106,7 +106,7 @@ function main() {
 
   let fails = 0
   const keys = Object.keys(a)
-  console.log(`\n  Thebes SDK boundary oracle — ${keys.length} cases × 2 builds\n`)
+  console.log(`\n  Thebes SDK boundary oracle, ${keys.length} cases × 2 builds\n`)
   for (const k of keys) {
     const ok = a[k] === b[k]
     if (!ok) fails++
@@ -134,11 +134,11 @@ function main() {
 
   console.log('')
   if (fails === 0) {
-    console.log('  ✓ PASS — Candid wire encoding/decoding is BYTE-IDENTICAL across both')
+    console.log('  ✓ PASS: Candid wire encoding/decoding is BYTE-IDENTICAL across both')
     console.log('    builds, and the two sources agree on the transport envelope.\n')
     process.exit(0)
   }
-  console.log(`  ✗ FAIL — ${fails} divergence(s). This is a wire regression; do NOT ship.\n`)
+  console.log(`  ✗ FAIL: ${fails} divergence(s). This is a wire regression; do NOT ship.\n`)
   process.exit(1)
 }
 

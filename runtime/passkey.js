@@ -20,17 +20,15 @@
  * The Memphis canister is at cid 921; RP_ID matches the page's origin
  * (memphis.mercaturaforum.com).
  *
- * REGISTRATION TAKES THREE FACTORS (MIN_FACTORS_AT_SIGNUP = 3 since
- * 2026-08-29): a device passkey, a second passkey, and a recovery phrase.
- * `register(name)` below sends ONE and is kept only for a canister that still
- * accepts that; against cid 921 it is refused by INV-MEM-1 with
- * `InvariantViolation { id = "INV-MEM-1"; details = ... }` — NOT with
- * InsufficientFactors, which is a different variant and is never what a
- * short signup returns. Drive
- * a signup through beginRegistrationChallenge + buildDeviceFactor x2 +
- * buildRecoveryFactor + registerWithFactors, which is what the connect broker
- * and every current example do. `recovery.js` must be loaded alongside this
- * file for the phrase factor.
+ * REGISTRATION TAKES THREE FACTORS (MIN_FACTORS_AT_SIGNUP = 3): a device
+ * passkey, a second passkey, and a recovery phrase. `register(name)` below
+ * sends ONE and is kept only for a canister that still accepts that; the
+ * identity contract refuses it with
+ * `InvariantViolation { id = "INV-MEM-1"; details = ... }` (a different
+ * variant from InsufficientFactors). Drive a signup through
+ * beginRegistrationChallenge + buildDeviceFactor x2 + buildRecoveryFactor +
+ * registerWithFactors, which is what the connect broker and every example do.
+ * `recovery.js` must be loaded alongside this file for the phrase factor.
  */
 (function (global) {
     "use strict";
@@ -203,15 +201,15 @@
     // Encode `(vec FactorRegistration)`. Three type-table entries: T0 is
     // `vec nat8` (blob), T1 is the record whose fields ALL reference T0,
     // T2 is `vec T1`. Field type-refs in T1 are POSITIVE-SLEB type-table
-    // indices, not inline `vec nat8` opcodes — Candid forbids compound
+    // indices, not inline `vec nat8` opcodes, Candid forbids compound
     // types (vec, opt, record, variant) appearing inline at a field's
     // type-ref position; they MUST appear in the type table and the
     // field references the index.
     function encVecFactorRegistration(factors) {
-        // Blob fields plus the optional `kind : opt FactorKindArg` (P2.4 —
-        // marks a signup factor as the recovery phrase; absent ⇒ WebAuthn).
+        // Blob fields plus the optional `kind : opt FactorKindArg`, which
+        // marks a signup factor as the recovery phrase (absent means WebAuthn).
         // A canister that predates the field skips it per Candid width
-        // subtyping, so this encoding is safe against cid 921 as deployed.
+        // subtyping, so this encoding is safe against an older build.
         const KIND_ORDER = ["WebAuthn", "RecoveryPhrase"]
             .map(n => ({ name: n, hash: candidFieldHash(n) }))
             .sort((a, b) => a.hash - b.hash);
@@ -413,8 +411,8 @@
     // small and easy to audit.
 
     function skipTypeTable(u8, off) {
-        // We don't *use* the type table for the value walker — the canister
-        // emits a well-known shape per method — but we have to advance past
+        // We don't *use* the type table for the value walker, the canister
+        // emits a well-known shape per method, but we have to advance past
         // it. Each type def is a sleb followed by a variable structure.
         const [tts, a1] = readUleb(u8, off); off = a1;
         for (let i = 0n; i < tts; i++) {
@@ -430,7 +428,7 @@
                 // opt / vec: one inner type-ref
                 const [_t, a3] = readSleb(u8, off); off = a3;
             } else if (code === -22n) {
-                // func: arg-vec, ret-vec, ann-vec — we don't expect these
+                // func: arg-vec, ret-vec, ann-vec, we don't expect these
                 throw new Error("func type unexpected");
             } else if (code === -23n) {
                 throw new Error("service type unexpected");
@@ -545,7 +543,7 @@
     // list. The two decoders above are this function with their field lists
     // inlined; new records use this rather than growing a third copy.
     // Candid mandates hash-sorted field order on the wire, which is what
-    // sortedFieldOrder reproduces — the declaration order here is irrelevant.
+    // sortedFieldOrder reproduces, the declaration order here is irrelevant.
     function decodeResultRecordFields(replyBytes, fields) {
         let off = expectDidlMagic(replyBytes);
         off = skipTypeTable(replyBytes, off);
@@ -599,7 +597,7 @@
     }
 
     // Decode the MemphisError variant payload that follows the outer Err tag.
-    // Candid orders variant fields by FIELD HASH, not declaration order — the
+    // Candid orders variant fields by FIELD HASH, not declaration order, the
     // previous version of this function mapped the OUTER tag through a
     // positional table and rendered every error as "NotAuthenticated". This
     // one reads the INNER variant tag and resolves it through the hash-sorted
@@ -664,7 +662,7 @@
         if (callRes.error) throw new Error("call: " + callRes.error);
         if (!callRes.message_hash) throw new Error("call: missing message_hash in response");
         const hash = callRes.message_hash;
-        // Poll up to ~8 s — single-canister cluster finalises in ~200 ms,
+        // Poll up to ~8 s, single-canister cluster finalises in ~200 ms,
         // so this is generous but bounded.
         const deadline = Date.now() + 8000;
         let lastLifecycle = "submitted";
@@ -721,7 +719,7 @@
             val = ((buf[off++] << 24) >>> 0) + (buf[off++] << 16) + (buf[off++] << 8) + buf[off++];
             val = val >>> 0;
         } else if (ai === 27) {
-            // 8-byte length — rarely used at WebAuthn scale; reject for safety.
+            // 8-byte length, rarely used at WebAuthn scale; reject for safety.
             throw new Error("CBOR 64-bit length unsupported");
         } else {
             throw new Error("CBOR indef/reserved unsupported ai=" + ai);
@@ -745,7 +743,7 @@
             return [map, off];
         }
         if (major === 6) {
-            // tagged value — read the inner item; we ignore tags.
+            // tagged value, read the inner item; we ignore tags.
             return cborRead(buf, off);
         }
         throw new Error("unsupported CBOR major: " + major);
@@ -788,10 +786,10 @@
     // Registration is a create()+get() PAIR over the same canister-issued
     // challenge, with attestation:"none":
     //   1. create() mints the credential; we extract only the COSE public key
-    //      from authData (we do NOT use the attestation statement — "none"
+    //      from authData (we do NOT use the attestation statement, "none"
     //      works on iOS/macOS Safari and Android, which don't emit "packed").
     //   2. get() immediately produces a real "webauthn.get" assertion over the
-    //      same challenge — a standard ECDSA-P256 sig over
+    //      same challenge, a standard ECDSA-P256 sig over
     //      authData ‖ SHA-256(clientDataJSON). The canister's INV-MEM-7
     //      verifier REQUIRES clientDataJSON.type == "webauthn.get" (see
     //      crates/memphis-webauthn verify_assertion), so the create-only
@@ -800,10 +798,10 @@
     async function webauthnCreate(challengeBytes, displayName) {
         // create()+get() PAIR over the same challenge. create() with
         // attestation:"none" mints the credential (we only need the COSE public
-        // key from authData — no attStmt, so it works on iOS/macOS Safari and
+        // key from authData, no attStmt, so it works on iOS/macOS Safari and
         // Android which return "none"). An immediate get() yields a real
         // "webauthn.get" assertion, which the canister's INV-MEM-7 REQUIRES
-        // (clientDataJSON.type must be "webauthn.get" — see crates/memphis-webauthn
+        // (clientDataJSON.type must be "webauthn.get", see crates/memphis-webauthn
         // verify_assertion). Two user-presence prompts; works on every device.
         let created;
         try {
@@ -817,10 +815,9 @@
                     displayName: displayName,
                 },
                 pubKeyCredParams: await pubKeyCredParams(),
-                // residentKey — without it the minted credential is non-
+                // residentKey: without it the minted credential is non-
                 // discoverable and signIn's get({allowCredentials: []}) cannot
-                // find it (2026-08-29 register-vs-signIn defect). "required" +
-                // the WebAuthn-L1 spelling matches the thebes-sdk runtime.
+                // find it. "required" plus the WebAuthn L1 spelling.
                 authenticatorSelection: {
                     residentKey: "required",
                     requireResidentKey: true,
@@ -986,7 +983,7 @@
     async function signIn(name) {
         const validated = validateName(name);
         const anchorBytes = await lookupAnchor(validated);
-        if (!anchorBytes) throw new Error("no Memphis identity for " + validated + " — register first");
+        if (!anchorBytes) throw new Error("no Memphis identity for " + validated + ", register first");
         // 1. begin_authentication(anchor_id)
         const challengeReply = await memphisCallAwait("begin_authentication", encBlob(anchorBytes));
         const dec = decodeResultBlob(challengeReply);
@@ -1013,20 +1010,18 @@
             expires_at_ns: authDec.ok.expires_at_ns.toString(),
             // AuthResult doesn't carry display_tag (the reply is just token +
             // expiry); derive it client-side from anchor_id. The canister
-            // uses the same formula in lib.rs:display_tag().
+            // uses the same formula in its display_tag().
             display_tag: bytesToHex(anchorBytes).slice(-4),
         };
         saveSession(session);
         return session;
     }
 
-    // P1.4 — never silently mint a NEW anchor under a name the user expected to
-    // sign INTO. If the name resolves, sign in. If it does not, the caller must
+    // Never silently mint a NEW anchor under a name the user expected to sign
+    // INTO. If the name resolves, sign in. If it does not, the caller must
     // explicitly opt into creation (`{ confirmCreate: true }`) after asking the
-    // user; otherwise we throw a typed `NameNotRegistered` so the UI can confirm.
-    // (Before this fix, a lookup miss silently re-registered — the "silent
-    // re-registration" bug. P0.1 stable storage removed the main trigger, but
-    // this closes the unsafe path itself.)
+    // user; otherwise a typed `NameNotRegistered` is thrown so the UI can
+    // confirm. A lookup miss must never re-register.
     async function signInOrRegister(name, opts) {
         const validated = validateName(name);
         const anchorBytes = await lookupAnchor(validated);
@@ -1038,9 +1033,9 @@
         throw err;
     }
 
-    // ─── P2 — factor lifecycle: add device / recovery phrase / remove ──────
+    // ─── P2, factor lifecycle: add device / recovery phrase / remove ──────
     //
-    // Canister surface (canisters/memphis/src/lib.rs):
+    // Canister surface:
     //   begin_add_factor(session_token)                       -> challenge
     //   add_factor(session_token, FactorRegistration, kind)   -> AddFactorResult
     //   remove_factor(session_token, factor_id)               -> RemoveFactorStatus
@@ -1226,7 +1221,7 @@
     // signed by the phrase-derived key instead: authenticatorData =
     // rpIdHash ‖ flags(UP|UV) ‖ signCount(0); clientDataJSON carries the
     // challenge (base64url) and THIS page's origin; the ECDSA message is
-    // authData ‖ SHA-256(clientDataJSON) — exactly what INV-MEM-7 verifies.
+    // authData ‖ SHA-256(clientDataJSON), exactly what INV-MEM-7 verifies.
     async function buildRecoveryAssertion(identity, challengeBytes) {
         const rpIdHash = await sha256b(utf8.encode(RP_ID));
         const authData = concat(rpIdHash, new Uint8Array([0x05]), new Uint8Array(4));
@@ -1307,7 +1302,7 @@
         const R = requireRecoveryModule();
         const validated = validateName(name);
         if (!(await R.validatePhrase(phrase))) {
-            throw new Error("that is not a valid recovery phrase — check the words and their order");
+            throw new Error("that is not a valid recovery phrase, check the words and their order");
         }
         const anchorBytes = await lookupAnchor(validated);
         if (!anchorBytes) throw new Error("no Memphis identity for " + validated);
@@ -1386,7 +1381,7 @@
         return true;
     }
 
-    // ── multi-factor registration (P2.4: MIN_FACTORS_AT_SIGNUP = 3) ────────
+    // ── multi-factor registration (MIN_FACTORS_AT_SIGNUP = 3) ──────────────
     //
     // The granular pieces let the UI orchestrate a 3-factor signup ceremony
     // (device passkey + second passkey + recovery phrase) over ONE
@@ -1466,8 +1461,8 @@
             if (!raw) return null;
             const s = JSON.parse(raw);
             if (!s.session_token_hex || !s.anchor_id_hex || !s.name) return null;
-            // Back-fill display_tag for sessions stored before P1.2 landed.
-            // Same formula as canisters/memphis/src/lib.rs:display_tag().
+            // Back-fill display_tag for sessions stored before it existed;
+            // the same formula as the canister's display_tag().
             if (!s.display_tag) s.display_tag = s.anchor_id_hex.slice(-4);
             return s;
         } catch (_) { return null; }
@@ -1479,7 +1474,7 @@
         try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
     }
 
-    // ─── P1.1.6: durable revoke-retry queue (Service Worker) ────────────────
+    // ─── durable revoke-retry queue (Service Worker) ────────────────────────
     //
     // Shared IndexedDB contract (MUST match sw.js):
     //   db    = "memphis-revoke-db" v1
@@ -1543,7 +1538,7 @@
     // Register the Service Worker + wire the page-driven retry triggers
     // (initial drain + window 'online'). Background Sync (Chrome/Edge) handles
     // page-close durability; the message path covers Safari/Firefox while a
-    // page is open. Idempotent — safe to call from every page's init.
+    // page is open. Idempotent, safe to call from every page's init.
     function registerRevokeWorker() {
         if (!("serviceWorker" in navigator)) return;
         navigator.serviceWorker.register("sw.js").then(function () {
@@ -1556,7 +1551,7 @@
     function kickRevokeRetry() {
         if (!("serviceWorker" in navigator)) return;
         navigator.serviceWorker.ready.then(function (reg) {
-            // Prefer Background Sync — durable across page close.
+            // Prefer Background Sync, durable across page close.
             if (reg.sync && typeof reg.sync.register === "function") {
                 reg.sync.register(REVOKE_SYNC_TAG).catch(function () {});
             }
@@ -1568,11 +1563,11 @@
     // Server-side revoke + localStorage clear. Idempotent: if no live session
     // is stored, just clears localStorage and returns. If the canister call
     // fails (network, expired session, bad token), the local copy is still
-    // cleared — leaving the UI signed out — and the revoke is durably queued
-    // (P1.1.6) so the Service Worker retries it until the canister confirms or
+    // cleared, leaving the UI signed out, and the revoke is durably queued
+    // so the Service Worker retries it until the canister confirms or
     // the token naturally expires.
     //
-    // Mirrors canisters/memphis/src/lib.rs:end_session, which is itself
+    // Mirrors the canister's end_session, which is itself
     // idempotent against unknown tokens (so re-issuing signOut is safe).
     async function signOut() {
         const s = loadSession();
@@ -1580,7 +1575,7 @@
         if (!s || !s.session_token_hex) return { ok: true, revoked: false };
         const tokenBytes = hexToBytes(s.session_token_hex);
         const argHex = bytesToHex(encBlob(tokenBytes));
-        // Queue BEFORE the network call — survives a page-close mid-revoke.
+        // Queue BEFORE the network call, survives a page-close mid-revoke.
         await queueRevoke(s.session_token_hex, argHex, s.expires_at_ns);
         try {
             const reply = await memphisCallAwait("end_session", encBlob(tokenBytes));
@@ -1602,7 +1597,7 @@
     // inert everywhere else, so an app cannot use it to authenticate as its own
     // users at some other app.
     //
-    // `ttlNs` defaults to the u64 maximum, which does NOT mean "forever" — the
+    // `ttlNs` defaults to the u64 maximum, which does NOT mean "forever", the
     // canister clamps to min(requested, its own ceiling, the parent's remaining
     // life). Asking for the maximum is how to say "for as long as the session I
     // came from lives" without this client knowing the canister's clock scaling.
@@ -1648,7 +1643,7 @@
 
     // Rotate the chain one step. BOTH halves are new and the presented refresh
     // token is dead the moment this returns, so a caller that stores only the
-    // access token has silently ended its own chain — store both or neither.
+    // access token has silently ended its own chain, store both or neither.
     // Presenting a spent token again revokes the whole chain, by design: the
     // only safe reading of a replay is that it was stolen.
     async function exchangeRefresh(refreshToken, origin) {
@@ -1690,14 +1685,14 @@
         signOut,
         registerRevokeWorker,
         validateName,
-        // P2 — factor lifecycle (identity durability).
+        // P2, factor lifecycle (identity durability).
         addDevice,
         setupRecoveryPhrase,
         signInWithRecoveryPhrase,
         listFactors,
         removeFactor,
         cancelFactorRemoval,
-        // P2.4 — granular multi-factor signup ceremony pieces.
+        // Granular multi-factor signup ceremony pieces.
         beginRegistrationChallenge,
         buildDeviceFactor,
         buildRecoveryFactor,

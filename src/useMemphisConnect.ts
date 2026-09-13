@@ -1,5 +1,5 @@
 /**
- * useMemphisConnect — Memphis sign-in for an app served from ITS OWN domain.
+ * useMemphisConnect, Memphis sign-in for an app served from ITS OWN domain.
  *
  * `useMemphis` runs the passkey ceremony in the page. That only works on the
  * Memphis origin itself: a WebAuthn credential is bound to a Relying Party ID,
@@ -10,10 +10,10 @@
  * This hook is the way across that wall. The ceremony happens in a window at the
  * Memphis origin, which attenuates the master session into a token minted for
  * YOUR origin and hands back only that. Use it whenever your app is not served
- * from the Memphis origin — which is every app with a domain of its own.
+ * from the Memphis origin, which is every app with a domain of its own.
  *
- * It is a thin React face over `session.ts`. All the bookkeeping — one session
- * per origin, expiry handling, redirect collection, legacy adoption — lives
+ * It is a thin React face over `session.ts`. All the bookkeeping, one session
+ * per origin, expiry handling, redirect collection, legacy adoption, lives
  * there so a non-React site gets exactly the same behaviour.
  *
  * The returned `token` is an ORIGIN-SCOPED session token. Pass it to your
@@ -37,7 +37,7 @@ export interface MemphisConnectAuth {
   displayName: string
   /** The scoped token to pass to your contract, or undefined when signed out. */
   token: string | undefined
-  /** MUST be called from a user gesture — a popup or redirect outside one is blocked. */
+  /** MUST be called from a user gesture, a popup or redirect outside one is blocked. */
   signIn: (opts?: ConnectOptions) => Promise<void>
   signOut: () => void
   busy: boolean
@@ -61,7 +61,7 @@ export function useMemphisConnect(app: string, legacy: LegacySessionKey[] = []):
 
   useEffect(() => {
     // Order matters. A redirect-mode return arrives in the URL fragment and must
-    // be consumed on this load — resumeFromRedirect also strips the fragment, so
+    // be consumed on this load, resumeFromRedirect also strips the fragment, so
     // a token is never left in the address bar. Only if there is nothing to
     // collect do we fall back to a session held from an earlier visit.
     const returned = (() => { try { return resumeFromRedirect() } catch { return null } })()
