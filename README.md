@@ -194,12 +194,6 @@ question, with the file and line; open a pull request against `main` with
 `npm run build` and `npm test` green. Each example repository carries its own
 contributing guide. Contributions are attributed to the team.
 
-## Acknowledgements
-
-The contracts are written in [Motoko](https://github.com/dfinity/motoko), the
-language developed by the DFINITY Foundation, and the boundary client speaks
-Candid, its interface description language.
-
 ## Licence
 
 Apache License 2.0. See [`NOTICE`](./NOTICE).
