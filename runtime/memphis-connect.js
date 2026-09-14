@@ -328,13 +328,16 @@
     return new Promise(function (resolve, reject) {
       var done = false;
 
-      function finish(fn, arg) {
+      // keepOpen: on a failure the popup stays where it is, showing the reason
+      // in the person's own words; closing it at once left them with an error
+      // that flashed and vanished, and nothing to report.
+      function finish(fn, arg, keepOpen) {
         if (done) return;
         done = true;
         global.removeEventListener("message", onMessage);
         clearInterval(poll);
         clearTimeout(timer);
-        try { if (win && !win.closed) win.close(); } catch (_) {}
+        if (!keepOpen) { try { if (win && !win.closed) win.close(); } catch (_) {} }
         fn(arg);
       }
 
@@ -356,7 +359,8 @@
             ? "Sign-in was cancelled."
             : (d.reason || "Sign-in did not complete."));
           err.code = d.reason === "closed" ? "CANCELLED" : "FAILED";
-          finish(reject, err);
+          try { console.error("[memphis-connect] sign-in failed:", err.code, d.reason); } catch (_) {}
+          finish(reject, err, err.code === "FAILED");
         }
       }
 

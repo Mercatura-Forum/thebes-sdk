@@ -823,7 +823,7 @@
                     requireResidentKey: true,
                     userVerification: "preferred",
                 },
-                timeout: 60000,
+                timeout: 300000, // five minutes: a cross-device (QR) ceremony can take well over a minute
                 attestation: "none",
             },
         });
@@ -853,7 +853,7 @@
                     { type: "public-key", id: credentialId, transports: ["internal", "hybrid", "usb", "nfc", "ble"] },
                 ],
                 userVerification: "preferred",
-                timeout: 60000,
+                timeout: 300000, // five minutes: a cross-device (QR) ceremony can take well over a minute
             },
         });
         if (!assertion) throw new Error("navigator.credentials.get returned null (registration probe)");
@@ -866,8 +866,26 @@
         };
     }
 
+    // A NotAllowedError carries no detail by design (the browser hides why); the
+    // cases that produce it here are a cancelled or timed-out prompt, a phone
+    // reached through a QR code that could not connect over Bluetooth, or a
+    // device holding no passkey for this origin. Say so, and keep the name.
+    function legibleGetError(e) {
+        if (!e || e.name !== "NotAllowedError") return e;
+        const err = new Error(
+            "The passkey sign-in did not complete (NotAllowedError). Either the prompt was cancelled or timed out, " +
+            "the device holds no passkey for " + RP_ID + ", or, when signing in through a QR code from another device, " +
+            "the two devices could not connect: both need Bluetooth on and the phone prompt must be completed. " +
+            "Try again on the device that registered the passkey, or register this device as a second factor.");
+        err.name = "NotAllowedError";
+        err.cause = e;
+        return err;
+    }
+
     async function webauthnGet(challengeBytes, allowCredentialIds) {
-        const cred = await navigator.credentials.get({
+        let cred;
+        try {
+        cred = await navigator.credentials.get({
             publicKey: {
                 challenge: challengeBytes,
                 rpId: RP_ID,
@@ -877,9 +895,10 @@
                     transports: ["internal", "hybrid", "usb", "nfc", "ble"],
                 })),
                 userVerification: "preferred",
-                timeout: 60000,
+                timeout: 300000, // five minutes: a cross-device (QR) ceremony can take well over a minute
             },
         });
+        } catch (e) { throw legibleGetError(e); }
         if (!cred) throw new Error("navigator.credentials.get returned null");
         return {
             credentialId: new Uint8Array(cred.rawId),
