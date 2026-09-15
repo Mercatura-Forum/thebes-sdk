@@ -188,7 +188,9 @@ npm test           # the encoding oracle (Candid wire bytes of two builds agree)
                    # transport oracle (the passkey runtime against a scripted network)
 npm run audit:copies:live   # every deployed copy of the passkey runtime against this tree
 python3 tools/e2e-new-user.py   # browser battery: sign up, sign in, sign out, sign in again,
-                                # per algorithm, same device and cross device (needs Playwright)
+                                # per algorithm, same device and cross device (needs Playwright);
+                                # --discoverable signs the cross-device step in with the passkey alone,
+                                # --bed-node/--bed-cid run it against a local test chain
 ```
 
 ## Contributing

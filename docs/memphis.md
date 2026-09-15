@@ -428,6 +428,29 @@ All three sign the **same** challenge, so the anchor is admitted in one atomic
   anchor would leave the person holding twelve words that open nothing, which is
   why the resume is explicit and comes first.
 
+**Sign in with the passkey alone, and recover a lost registration.** A
+canister that lists `discoverable_authentication` in `pk.capabilities()` mints an
+authentication challenge bound to no anchor; `pk.signInDiscoverable()` lets the
+authenticator choose the credential and returns the session with the handle
+the identity claimed (`name` is null when it never claimed one). The same build
+answers `anchor_for_credential`, which is how the runtime finishes a
+registration whose reply never arrived: the credential it minted leads back to
+the anchor, one assertion signs in, and the handle is claimed on it, so no
+second identity is ever created for the same passkeys. Against a canister
+without these (the query `capabilities` is absent), every one of these paths is
+off and the runtime behaves exactly as before; nothing has to be configured.
+
+**Reads that know about writes.** A query is answered by one node, and a node
+that has not yet executed a write answers as if it never happened. The canister
+keeps a write counter; `register_v2` and `claim_name_v2` report it in their
+replies, and the seq-stamped lookups (`anchor_for_name_v2`,
+`anchor_for_credential`, `name_for_anchor`) report the answering node's value.
+The runtime keeps the highest counter it has seen in `sessionStorage`
+(`memphisSeqV1`) and retries a lookup that answers from behind it, with a
+growing pause and an 8 s bound, before the answer is used. If you drive the
+canister directly, do the same: never conclude "no identity" from a single
+read taken right after your own write.
+
 **Transport errors are typed.** A slow or busy network is reported as what it is,
 never as a refusal: `MemphisReceiptTimeout` (submitted, not confirmed within the
 budget; `messageHash` and `method` on the error), `MemphisNetworkBusy` (every

@@ -20,6 +20,9 @@
  *                                   started and did not confirm (no new passkey prompt)
  *   pendingRegistration()        -> { name, stage, at } | null
  *   onProgress(cb)               -> stage text while a step waits on the network or the device
+ *   signInDiscoverable()         -> session; the passkey on this device chooses the identity,
+ *                                   no handle typed (canister capability "discoverable_authentication")
+ *   capabilities() / hasCapability(name) -> what the canister lists beyond the original surface
  *
  * The Memphis canister is at cid 921; RP_ID matches the page's origin
  * (memphis.mercaturaforum.com).
@@ -595,6 +598,43 @@
         return { err: extractErrorTag(replyBytes, off, tag) };
     }
 
+    // Decode `(record { value : opt blob|text; seq : nat64 })`, the seq-stamped
+    // lookups. Fields travel in hash order; `seq` (5_741_471) sorts before
+    // `value` (100_898_838), so the counter comes first.
+    function decodeSeqLookup(replyBytes, kind) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const out = { value: null, seq: 0n };
+        for (const fd of sortedFieldOrder([["seq", "nat64"], ["value", "opt"]])) {
+            if (fd.t === "nat64") {
+                let v = 0n;
+                for (let i = 0n; i < 8n; i++) v |= BigInt(replyBytes[off + Number(i)]) << (i * 8n);
+                out.seq = v; off += 8;
+            } else {
+                const present = replyBytes[off++];
+                if (present === 1) {
+                    const [len, a] = readUleb(replyBytes, off); off = a;
+                    const bytes = replyBytes.slice(off, off + Number(len)); off += Number(len);
+                    out.value = kind === "text" ? utf8d.decode(bytes) : bytes;
+                }
+            }
+        }
+        return out;
+    }
+
+    // Decode `(vec text)`, the capabilities list.
+    function decodeVecText(replyBytes) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const [n, a] = readUleb(replyBytes, off); off = a;
+        const out = [];
+        for (let i = 0; i < Number(n); i++) {
+            const [len, b] = readUleb(replyBytes, off); off = b;
+            out.push(utf8d.decode(replyBytes.slice(off, off + Number(len)))); off += Number(len);
+        }
+        return out;
+    }
+
     function sortedFieldOrder(fields) {
         return fields.map(([n, t]) => ({ name: n, hash: candidFieldHash(n), t }))
                      .sort((a, b) => a.hash - b.hash);
@@ -869,6 +909,61 @@
         return base64ToBytes(res.reply);
     }
 
+    // ─── capabilities, and reads that know about writes ────────────────────
+    //
+    // A query is answered by whichever node the boundary picks, and a node
+    // that has not yet executed a write answers as if it never happened. The
+    // canister keeps a write counter, stamps it on the replies of the v2
+    // methods, and reports it with every seq-stamped lookup. This client keeps
+    // the highest counter it has seen this session; a lookup that answers with
+    // a lower one predates something this browser already did, and is retried
+    // for a bounded while before the answer is used at all.
+    //
+    // The canister lists what it can do in `capabilities()`; a canister without
+    // the query is the original surface and every v2 path stays off, so this
+    // file works against either build.
+    let capsPromise = null;
+    function capabilities() {
+        if (capsPromise) return capsPromise;
+        capsPromise = (async function () {
+            try {
+                return new Set(decodeVecText(await memphisQuery("capabilities", new Uint8Array([0x44, 0x49, 0x44, 0x4c, 0x00, 0x00]))));
+            } catch (_) {
+                return new Set();
+            }
+        })();
+        return capsPromise;
+    }
+    async function hasCapability(name) { return (await capabilities()).has(name); }
+
+    const SEQ_KEY = "memphisSeqV1";
+    function maxSeq() {
+        try { const v = sessionStorage.getItem(SEQ_KEY); return v ? BigInt(v) : 0n; } catch (_) { return 0n; }
+    }
+    function noteSeq(seq) {
+        try {
+            const v = BigInt(seq);
+            if (v > maxSeq()) sessionStorage.setItem(SEQ_KEY, v.toString());
+        } catch (_) {}
+    }
+    const SEQ_RETRY_WAITS_MS = [250, 500, 1000, 2000, 4000];
+
+    // A seq-stamped lookup. `untilPresent`: this browser knows the value
+    // exists (it just wrote it), so a miss is retried within the same bound.
+    async function seqQuery(method, argBytes, kind, untilPresent) {
+        let got = decodeSeqLookup(await memphisQuery(method, argBytes), kind);
+        for (const wait of SEQ_RETRY_WAITS_MS) {
+            const behind = got.seq < maxSeq();
+            const missing = untilPresent && got.value === null;
+            if (!behind && !missing) break;
+            await sleep(wait);
+            got = decodeSeqLookup(await memphisQuery(method, argBytes), kind);
+        }
+        noteSeq(got.seq);
+        got.stale = got.seq < maxSeq();
+        return got;
+    }
+
     // ─── CBOR (the minimum needed to extract authData) ─────────────────────
     function cborRead(buf, off) {
         const initial = buf[off++];
@@ -1082,7 +1177,10 @@
         return n;
     }
 
-    async function lookupAnchor(name) {
+    async function lookupAnchor(name, untilPresent) {
+        if (await hasCapability("anchor_for_name_v2")) {
+            return (await seqQuery("anchor_for_name_v2", encText(name), "blob", !!untilPresent)).value;
+        }
         const reply = await memphisQuery("anchor_for_name", encText(name));
         return decodeOptBlob(reply);
     }
@@ -1123,7 +1221,7 @@
                 client_data_json: factor.client_data_json,
                 signature: factor.signature,
             },
-        ]));
+        ]), [bytesToHex(factor.credentialId)]);
     }
 
     // ─── registration, resumable ───────────────────────────────────────────
@@ -1188,22 +1286,75 @@
     }
 
     // The registration write, from "on the wire" to "signed in".
-    async function submitRegistration(validated, regArgBytes) {
+    async function submitRegistration(validated, regArgBytes, credentialIdsHex) {
         clearPendingCall();
-        savePendingRegistration({ name: validated, stage: "submitted" });
+        savePendingRegistration({ name: validated, stage: "submitted", credentials: credentialIdsHex || [] });
+        const v2 = await hasCapability("register_v2");
         let regReply;
         try {
-            regReply = await memphisCallAwait("register", regArgBytes);
+            regReply = await memphisCallAwait(v2 ? "register_v2" : "register", regArgBytes);
         } catch (e) {
             // Refused outright: nothing was minted, nothing to resume.
             if (e && (e.code === "MemphisCanisterError" || e.code === "MemphisNetworkBusy")) clearPendingRegistration();
+            // Ran, reply lost: the anchor exists and holds these credentials.
+            // With a canister that answers anchor_for_credential the identity
+            // is recovered here with one passkey prompt; without one the
+            // record stays for a later attempt to try again.
+            if (e && e.code === "MemphisSubmittedButLost" && (credentialIdsHex || []).length) {
+                const recovered = await recoverRegistration(validated, credentialIdsHex);
+                if (recovered) return recovered;
+            }
             throw e;
         }
-        return await finishRegistration(validated, regReply);
+        return await finishRegistration(validated, regReply, v2);
     }
 
-    async function finishRegistration(validated, regReply) {
-        const regDec = decodeResultRecordReg(regReply);
+    /**
+     * The identity exists on the chain and this browser holds its passkeys,
+     * but the registration reply never arrived. From a credential id alone:
+     * the anchor (anchor_for_credential), a bound challenge, one assertion by
+     * that passkey, a session, and the handle bound to it. Returns the session,
+     * or null when the canister cannot answer anchor_for_credential.
+     */
+    async function recoverRegistration(validated, credentialIdsHex) {
+        if (!(await hasCapability("anchor_for_credential"))) return null;
+        emitProgress("Recovering the identity that was created for you.");
+        let anchorBytes = null, credId = null;
+        for (const hex of credentialIdsHex) {
+            const got = await seqQuery("anchor_for_credential", encBlob(hexToBytes(hex)), "blob", true);
+            if (got.value) { anchorBytes = got.value; credId = hexToBytes(hex); break; }
+        }
+        if (!anchorBytes) return null;
+        const challengeReply = await memphisCallAwait("begin_authentication", encBlob(anchorBytes));
+        const dec = decodeResultBlob(challengeReply);
+        if (dec.err) throw new Error("begin_authentication: " + (dec.err.message || dec.err.name));
+        const assertion = await webauthnGet(dec.ok, [credId]);
+        const authReply = await memphisCallAwait("authenticate", encFactorAssertion({
+            credential_id: assertion.credentialId,
+            authenticator_data: assertion.authenticatorData,
+            client_data_json: assertion.clientDataJSON,
+            signature: assertion.signature,
+        }));
+        const authDec = decodeResultRecordAuth(authReply);
+        if (authDec.err) throw new Error("authenticate: " + authDec.err.name);
+        const session = {
+            name: validated,
+            anchor_id_hex: bytesToHex(anchorBytes),
+            session_token_hex: bytesToHex(authDec.ok.session_token),
+            expires_at_ns: authDec.ok.expires_at_ns.toString(),
+            display_tag: bytesToHex(anchorBytes).slice(-4),
+        };
+        savePendingRegistration({ name: validated, stage: "registered", session });
+        return await claimForSession(validated, session);
+    }
+
+    async function finishRegistration(validated, regReply, v2) {
+        const regDec = v2
+            ? decodeResultRecordFields(regReply, [
+                ["anchor_id", "blob"], ["session_token", "blob"], ["expires_at_ns", "nat64"],
+                ["display_tag", "text"], ["seq", "nat64"]])
+            : decodeResultRecordReg(regReply);
+        if (regDec.ok && regDec.ok.seq !== undefined) noteSeq(regDec.ok.seq);
         if (regDec.err) {
             clearPendingRegistration();
             // Carry the typed variant + the canister's sentence so callers can
@@ -1221,11 +1372,15 @@
 
     async function claimForSession(validated, session) {
         emitProgress("Binding your handle to the new identity.");
+        const v2 = await hasCapability("claim_name_v2");
         const claimReply = await memphisCallAwait(
-            "claim_name",
+            v2 ? "claim_name_v2" : "claim_name",
             encClaimNameArgs(hexToBytes(session.session_token_hex), validated, location.origin, 0)
         );
-        const claimDec = decodeResultText(claimReply);
+        const claimDec = v2
+            ? decodeResultRecordFields(claimReply, [["name", "text"], ["seq", "nat64"]])
+            : decodeResultText(claimReply);
+        if (claimDec.ok && claimDec.ok.seq !== undefined) noteSeq(claimDec.ok.seq);
         if (claimDec.err) {
             const detail = claimDec.err.message || claimDec.err.name;
             // The canister refused the claim: either the name went to someone
@@ -1258,15 +1413,22 @@
             return await claimForSession(validated, rec.session);
         }
         if (rec.stage === "submitted") {
-            const reply = await collectPendingCall("register", 30000);
-            if (!reply) {
-                // Not executed within the wait, or dead: the record stays only
-                // while the hash is still alive in the pool.
-                if (!loadPendingCall("register")) clearPendingRegistration();
-                return null;
+            const method = (await hasCapability("register_v2")) ? "register_v2" : "register";
+            const reply = await collectPendingCall(method, 30000);
+            if (reply) {
+                emitProgress("Finishing the identity you started.");
+                return await finishRegistration(validated, reply, method === "register_v2");
             }
-            emitProgress("Finishing the identity you started.");
-            return await finishRegistration(validated, reply);
+            // No reply to collect. If the write ran anyway, the credentials
+            // this browser minted lead back to the anchor.
+            if (rec.credentials && rec.credentials.length) {
+                const recovered = await recoverRegistration(validated, rec.credentials);
+                if (recovered) return recovered;
+            }
+            // Not executed within the wait, or dead: the record stays only
+            // while the hash is still alive in the pool.
+            if (!loadPendingCall(method)) clearPendingRegistration();
+            return null;
         }
         clearPendingRegistration();
         return null;
@@ -1280,10 +1442,10 @@
     // returned is used if the query still misses (the canister refuses an
     // anchor that does not exist, so nothing is trusted that it does not hold).
     async function anchorForOwnName(validated) {
-        let anchorBytes = await lookupAnchor(validated);
-        if (anchorBytes) return anchorBytes;
         const held = loadSession();
         const own = held && held.name === validated && held.anchor_id_hex ? held : null;
+        let anchorBytes = await lookupAnchor(validated, !!own);
+        if (anchorBytes) return anchorBytes;
         if (!own) return null;
         for (const wait of [500, 1000, 2000, 4000]) {
             await sleep(wait);
@@ -1355,6 +1517,46 @@
         err.code = "NameNotRegistered";
         err.nameRequested = validated;
         throw err;
+    }
+
+    /**
+     * Sign in with the passkey on this device, no handle typed. The canister
+     * mints an authentication challenge bound to no anchor, the authenticator
+     * chooses the credential, and the assertion binds the challenge to that
+     * credential's anchor. The handle comes back from the anchor (null when
+     * the identity never claimed one). Needs a canister that lists
+     * `discoverable_authentication`; throws `MemphisNotSupported` otherwise.
+     */
+    async function signInDiscoverable() {
+        if (!(await hasCapability("discoverable_authentication"))) {
+            throw typedError("MemphisNotSupported", "This Memphis does not offer sign-in without a handle yet.");
+        }
+        const challengeReply = await memphisCallAwait("begin_authentication_discoverable", new Uint8Array([0x44, 0x49, 0x44, 0x4c, 0x00, 0x00]));
+        const dec = decodeResultBlob(challengeReply);
+        if (dec.err) throw new Error("begin_authentication_discoverable: " + (dec.err.message || dec.err.name));
+        const assertion = await webauthnGet(dec.ok, []);
+        emitProgress("The network is confirming your sign-in.");
+        const authReply = await memphisCallAwait("authenticate", encFactorAssertion({
+            credential_id: assertion.credentialId,
+            authenticator_data: assertion.authenticatorData,
+            client_data_json: assertion.clientDataJSON,
+            signature: assertion.signature,
+        }));
+        const authDec = decodeResultRecordAuth(authReply);
+        if (authDec.err) throw new Error("authenticate: " + authDec.err.name);
+        // The anchor and the handle are old writes: no staleness to guard.
+        const anchor = await seqQuery("anchor_for_credential", encBlob(assertion.credentialId), "blob", true);
+        if (!anchor.value) throw new Error("anchor_for_credential: the credential that just signed in is unknown");
+        const named = await seqQuery("name_for_anchor", encBlob(anchor.value), "text", false);
+        const session = {
+            name: named.value || null,
+            anchor_id_hex: bytesToHex(anchor.value),
+            session_token_hex: bytesToHex(authDec.ok.session_token),
+            expires_at_ns: authDec.ok.expires_at_ns.toString(),
+            display_tag: bytesToHex(anchor.value).slice(-4),
+        };
+        saveSession(session);
+        return session;
     }
 
     // ─── P2, factor lifecycle: add device / recovery phrase / remove ──────
@@ -1749,7 +1951,10 @@
 
     async function registerWithFactors(name, factors) {
         const validated = validateName(name);
-        return await submitRegistration(validated, encVecFactorRegistration(factors));
+        const creds = factors
+            .filter(f => f.kind !== "RecoveryPhrase" && f.credential_id)
+            .map(f => bytesToHex(f.credential_id));
+        return await submitRegistration(validated, encVecFactorRegistration(factors), creds);
     }
 
     // ─── session storage ───────────────────────────────────────────────────
@@ -2000,11 +2205,16 @@
         // A registration this browser did not confirm: finish it, or ask.
         resumePendingRegistration,
         pendingRegistration,
+        // Sign in with the passkey on this device, no handle (canister permitting).
+        signInDiscoverable,
+        capabilities,
+        hasCapability,
         // Stage text while a step waits on the network or the device.
         onProgress,
         // Lower-level helpers, exposed for diagnostics.
         _memphisCallAwait: memphisCallAwait,
         _memphisQuery: memphisQuery,
         _bytesToHex: bytesToHex,
+        _noteSeq: noteSeq,
     };
 })(window);

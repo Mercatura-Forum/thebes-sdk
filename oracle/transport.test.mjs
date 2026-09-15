@@ -21,7 +21,10 @@ function runtime(script) {
     crypto: webcrypto, btoa: (s) => Buffer.from(s, "binary").toString("base64"), atob: (s) => Buffer.from(s, "base64").toString("binary"),
     location: { origin: "https://memphis.mercaturaforum.com" },
     localStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
-    navigator: {}, indexedDB: undefined,
+    sessionStorage: { getItem: (k) => (store.has("s:" + k) ? store.get("s:" + k) : null), setItem: (k, v) => store.set("s:" + k, String(v)), removeItem: (k) => store.delete("s:" + k) },
+    // A passkey that answers every assertion request: the bytes are never verified here.
+    navigator: { credentials: { get: async () => ({ rawId: new Uint8Array([1, 2, 3, 4]).buffer, response: { authenticatorData: new Uint8Array(37).buffer, clientDataJSON: new Uint8Array([123, 125]).buffer, signature: new Uint8Array(64).buffer } }) } },
+    indexedDB: undefined,
     Date: { now: () => now },
     setTimeout: (fn, ms) => { timers.push({ at: now + (ms || 0), fn }); return timers.length; },
     clearTimeout: () => {},
@@ -179,6 +182,89 @@ function check(name, ok, detail) {
   check("8b resume finishes with the same anchor and no second register", session && session.anchor_id_hex === ANCHOR && registers === 1 && claims === 2 && !store.get("memphisPendingRegistrationV1"), JSON.stringify({ session, registers, claims }));
   const again = await settle(pk.resumePendingRegistration("nu77615-0.thebes"));
   check("8c nothing pending afterwards", again === null, String(again));
+}
+
+
+// ── The Sep-15 canister surface: v2 replies with seq, stale reads retried, recovery ──
+const REPLIES = {"register_v2": "4449444c066b02bc8a0101c5fed201036c059fb7de02789da5f4e10371a5ddb5810602908cb0dc0c02c6c2b7be0e786d7b6b0be5fc9ff60204bec89aca037fa2a3ecff067fa0dcf8aa0805d4b4c59a097fa2c6bef1097fbcfbd9b70a7ff4b895a40b71e1d5f2b60e7f8ff6b0dd0e7fe4b7f5e10e7f6c02dbb70171c2b9dbda0a716c01b9a79ac207780100005501000000000000046664653820264b651f05863d47807d7643209ad4d1c400c88df61493eabb095e570a5cfde820092e41c30fe0a64f0958382abf06edbd8b69af7fa503cdf2bbf9dbbd14d8e7f0008c3788b51c0000", "claim_name_v2": "4449444c056b02bc8a0101c5fed201026c029fb7de0278cbe4fdc704716b0be5fc9ff60203bec89aca037fa2a3ecff067fa0dcf8aa0804d4b4c59a097fa2c6bef1097fbcfbd9b70a7ff4b895a40b71e1d5f2b60e7f8ff6b0dd0e7fe4b7f5e10e7f6c02dbb70171c2b9dbda0a716c01b9a79ac2077801000056010000000000000f73713233363432332e746865626573", "anchor_for_credential": "4449444c036c029fb7de0278f1fee18d03016e026d7b0100560100000000000001209efd862b300a9262335d2386cc6856b5465228ee04a8a9e7a84297d7c1296d72", "authenticate": "4449444c066b02bc8a0101c5fed201036c02908cb0dc0c02c6c2b7be0e786d7b6b0be5fc9ff60204bec89aca037fa2a3ecff067fa0dcf8aa0805d4b4c59a097fa2c6bef1097fbcfbd9b70a7ff4b895a40b71e1d5f2b60e7f8ff6b0dd0e7fe4b7f5e10e7f6c02dbb70171c2b9dbda0a716c01b9a79ac20778010000205fbc2e1019345f2f859a0922161e3fd9dd8c274883ba7e08e54fc105af5ec5fe00385b84bc1c0000", "begin_authentication": "4449444c056b02bc8a0101c5fed201026d7b6b0be5fc9ff60203bec89aca037fa2a3ecff067fa0dcf8aa0804d4b4c59a097fa2c6bef1097fbcfbd9b70a7ff4b895a40b71e1d5f2b60e7f8ff6b0dd0e7fe4b7f5e10e7f6c02dbb70171c2b9dbda0a716c01b9a79ac20778010000207fd9c2a60ad2f799fad0ab0399f0c8538a635907980c29d196516a49db98cf7a", "name_for_anchor": "4449444c026c029fb7de0278f1fee18d03016e710100580100000000000000"};
+const CAPS = "4449444c016d710100080a616c676f726974686d73037365710b72656769737465725f76320d636c61696d5f6e616d655f763212616e63686f725f666f725f6e616d655f763215616e63686f725f666f725f63726564656e7469616c0f6e616d655f666f725f616e63686f721b646973636f76657261626c655f61757468656e7469636174696f6e";
+const b64 = (hex) => Buffer.from(hex, "hex").toString("base64");
+const q = (hex) => json({ status: "success", reply: b64(hex) });
+const FACTOR = (cred) => ({ credential_id: cred, cose_pub_key_bytes: new Uint8Array(4), authenticator_data: new Uint8Array(37), client_data_json: new Uint8Array(2), signature: new Uint8Array(64), kind: "WebAuthn" });
+
+// 9. With capabilities present, registration goes through register_v2 and claim_name_v2 and the
+//    seq of each reply is remembered.
+{
+  const calls = [];
+  const { pk, settle, store } = runtime((url, init) => {
+    if (url.includes("/query")) {
+      const m = JSON.parse(init.body).method;
+      if (m === "capabilities") return q(CAPS);
+      throw new Error("unexpected query " + m);
+    }
+    if (url.endsWith("/api/call")) { const m = JSON.parse(init.body).method; calls.push(m); return json({ queued: true, message_hash: (m === "register_v2" ? "31" : "32").repeat(32) }); }
+    if (url.includes("/api/receipt?hash=" + "31".repeat(32))) return json({ found: true, status: "success", lifecycle: "success", reply: REPLIES.register_v2 });
+    if (url.includes("/api/receipt?hash=" + "32".repeat(32))) return json({ found: true, status: "success", lifecycle: "success", reply: REPLIES.claim_name_v2 });
+    throw new Error("unexpected " + url);
+  });
+  const session = await settle(pk.registerWithFactors("sq262606.thebes", [FACTOR(new Uint8Array([9, 9]))]));
+  check("9 register_v2 and claim_name_v2 are used when the canister lists them", calls.join(",") === "register_v2,claim_name_v2" && session && session.anchor_id_hex.length === 64, calls.join(","));
+  check("9b the highest seq seen is remembered (the claim reply seq, 342)", store.get("s:memphisSeqV1") === "342", store.get("s:memphisSeqV1"));
+}
+
+// 10. A seq-stamped lookup that answers from behind the remembered seq is retried until a node
+//     at or past it answers; the stale miss is never taken as "no identity".
+{
+  let lookups = 0;
+  const { pk, settle } = runtime((url, init) => {
+    if (url.includes("/query")) {
+      const m = JSON.parse(init.body).method;
+      if (m === "capabilities") return q(CAPS);
+      if (m === "anchor_for_name_v2") {
+        lookups++;
+        // Two stale misses (seq 300, no value), then the current answer (seq 339, anchor present).
+        if (lookups < 3) return q("4449444c036c029fb7de0278f1fee18d03016e026d7b01002c0100000000000000");
+        return q(REPLIES.anchor_for_credential);
+      }
+      throw new Error("unexpected query " + m);
+    }
+    if (url.endsWith("/api/call")) return json({ queued: true, message_hash: "33".repeat(32) });
+    // begin_authentication answers with a canister refusal so the flow ends right after the lookup.
+    if (url.includes("/api/receipt")) return json({ found: true, status: "error", lifecycle: "error", error: "stop here" });
+    throw new Error("unexpected " + url);
+  });
+  pk._noteSeq(339);
+  let err = null;
+  try { await settle(pk.signIn("sq262606.thebes")); } catch (e) { err = e; }
+  check("10 a stale lookup (seq 300 < 339) is retried until current; the flow then continues", lookups === 3 && err && err.code === "MemphisCanisterError" && /stop here/.test(err.detail), `lookups=${lookups} err=${err && (err.code + " " + err.message)}`);
+}
+
+// 11. The register_v2 reply is lost (the sender executed): the identity is recovered from the
+//     credential alone, with one assertion, and the handle is claimed on it. No second register.
+{
+  const calls = [];
+  const { pk, settle } = runtime((url, init) => {
+    if (url.includes("/query")) {
+      const m = JSON.parse(init.body).method;
+      if (m === "capabilities") return q(CAPS);
+      if (m === "anchor_for_credential") return q(REPLIES.anchor_for_credential);
+      throw new Error("unexpected query " + m);
+    }
+    if (url.includes("/api/next_nonce")) return json({ next_nonce: 1 });
+    if (url.endsWith("/api/call")) {
+      const m = JSON.parse(init.body).method; calls.push(m);
+      if (m === "register_v2") return json({ status: "error", error: "rss_backpressure" }, 503);
+      return json({ queued: true, message_hash: ("4" + calls.length).repeat(32) });
+    }
+    if (url.includes("/api/receipt?hash=" + "42".repeat(32))) return json({ found: true, status: "success", lifecycle: "success", reply: REPLIES.begin_authentication });
+    if (url.includes("/api/receipt?hash=" + "43".repeat(32))) return json({ found: true, status: "success", lifecycle: "success", reply: REPLIES.authenticate });
+    if (url.includes("/api/receipt?hash=" + "44".repeat(32))) return json({ found: true, status: "success", lifecycle: "success", reply: REPLIES.claim_name_v2 });
+    throw new Error("unexpected " + url);
+  });
+  const session = await settle(pk.registerWithFactors("sq262606.thebes", [FACTOR(new Uint8Array([0x9e, 0xfd]))]));
+  check("11 a lost register_v2 reply is recovered from the credential: one register, then begin_authentication, authenticate, claim_name_v2",
+    calls.join(",") === "register_v2,begin_authentication,authenticate,claim_name_v2" && session && session.anchor_id_hex.startsWith("9efd862b"),
+    calls.join(",") + " " + (session && session.anchor_id_hex));
 }
 
 console.log(failures ? `\n  ${failures} failing` : "\n  transport: every case holds");

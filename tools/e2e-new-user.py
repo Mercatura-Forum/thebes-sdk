@@ -38,6 +38,9 @@ ap.add_argument("--local-connect-dir", default=None)
 ap.add_argument("--delay-pending", type=float, default=0.0)
 ap.add_argument("--algorithms", default="-7,-257,-8")
 ap.add_argument("--app-origin", default="https://example-app.test")
+ap.add_argument("--bed-node", default=None, help="route every canister call to this node URL instead of the public boundary (a local test chain)")
+ap.add_argument("--bed-cid", type=int, default=None, help="the identity canister id on that chain")
+ap.add_argument("--discoverable", action="store_true", help="the cross-device step signs in with the passkey alone, no handle typed (needs a canister that lists discoverable_authentication)")
 A = ap.parse_args()
 
 CONNECT = A.connect
@@ -86,8 +89,57 @@ def authenticator(ctx, page):
     return s, a["authenticatorId"]
 
 
+def route_to_bed(ctx):
+    """The runtime speaks to the public boundary by absolute URL; on a bed every one of those
+    requests is re-addressed to the local node (call, receipt, next_nonce, and the v1 query shape,
+    whose base64 reply the node answers in hex)."""
+    import base64 as b64mod
+    bed, cid = A.bed_node.rstrip("/"), A.bed_cid
+    def handler(route, request):
+        url = request.url
+        path = url.split(CONNECT_ORIGIN, 1)[1]
+        api = ctx.request
+        try:
+            if path.startswith("/api/call"):
+                body = json.loads(request.post_data or "{}"); body["canister_id"] = cid
+                r = api.post(bed + "/api/call", data=json.dumps(body), headers={"content-type": "application/json"})
+                route.fulfill(status=r.status, content_type="application/json", body=r.body())
+            elif path.startswith("/api/receipt") or path.startswith("/api/next_nonce"):
+                r = api.get(bed + path)
+                route.fulfill(status=r.status, content_type="application/json", body=r.body())
+            elif "/query" in path:
+                body = json.loads(request.post_data or "{}")
+                arg_hex = b64mod.b64decode(body.get("arg", "")).hex()
+                r = api.post(bed + "/api/query", data=json.dumps({"canister_id": cid, "method": body.get("method"), "arg": arg_hex, "sender": ""}), headers={"content-type": "application/json"})
+                j = r.json()
+                if j.get("status") == "success" and j.get("reply") is not None:
+                    j["reply"] = b64mod.b64encode(bytes.fromhex(j["reply"])).decode()
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(j))
+            else:
+                route.continue_()
+        except Exception as e:
+            route.fulfill(status=502, content_type="application/json", body=json.dumps({"status": "error", "error": "bed route: " + str(e)}))
+    ctx.route(CONNECT_ORIGIN + "/api/**", handler)
+
+
 def query_anchor(handle):
     import base64
+    if A.bed_node:
+        n = handle.encode()
+        def uleb(x):
+            o = bytearray()
+            while True:
+                b = x & 0x7f; x >>= 7
+                if x == 0:
+                    o.append(b); return bytes(o)
+                o.append(b | 0x80)
+        arg = b"DIDL\x00\x01\x71" + uleb(len(n)) + n
+        req = urllib.request.Request(A.bed_node.rstrip("/") + "/api/query",
+            data=json.dumps({"canister_id": A.bed_cid, "method": "anchor_for_name", "arg": arg.hex(), "sender": ""}).encode(),
+            headers={"content-type": "application/json"})
+        r = json.load(urllib.request.urlopen(req, timeout=30))
+        rep = bytes.fromhex(r.get("reply", "")) if r.get("status") == "success" else b""
+        return rep[-32:].hex() if len(rep) > 40 and rep[-34] == 1 and rep[-33] == 0x20 else None
     n = handle.encode()
     def uleb(x):
         o = bytearray()
@@ -116,6 +168,8 @@ class Rig:
         b = self.p.chromium.launch()
         ctx = b.new_context(viewport={"width": 1280, "height": 900})
         ctx.add_init_script(ONLY_ALG_INIT % self.alg)
+        if A.bed_node:
+            route_to_bed(ctx)
         if A.local_connect_dir:
             def serve(route, request):
                 name = request.url.split("?")[0].rstrip("/").split("/")[-1] or "connect.html"
@@ -239,8 +293,12 @@ def attempt(p, alg, i):
                     s3.send("WebAuthn.addCredential", {"authenticatorId": aid3, "credential": {
                         "credentialId": c["credentialId"], "isResidentCredential": True, "rpId": "memphis.mercaturaforum.com",
                         "privateKey": c["privateKey"], "userHandle": c.get("userHandle") or "AA==", "signCount": c.get("signCount", 0)}})
-                popup.fill("#handle", handle)
-                popup.click("#go")
+                if A.discoverable:
+                    popup.wait_for_selector("#device:not([hidden])", timeout=60000)
+                    popup.click("#device")
+                else:
+                    popup.fill("#handle", handle)
+                    popup.click("#go")
                 deadline = time.time() + 900
                 r3, e3 = None, None
                 while time.time() < deadline:
@@ -260,13 +318,14 @@ def attempt(p, alg, i):
     finally:
         b.close()
     anchors = {x["anchorId"] for x in (r1, r2, r3) if x}
-    rec["register_calls_on_wire"] = sum(1 for l in rec["log"] if l.get("call") == "register")
+    rec["register_calls_on_wire"] = sum(1 for l in rec["log"] if l.get("call") in ("register", "register_v2"))
     try:
         rec["anchor_on_chain"] = query_anchor(handle)
     except Exception as e:
         rec["anchor_on_chain"] = "query failed: " + str(e)
     rec["pass"] = bool(r1 and r2 and r3 and len(anchors) == 1 and rec["register_calls_on_wire"] == 1
-                       and rec["anchor_on_chain"] == r1["anchorId"])
+                       and rec["anchor_on_chain"] == r1["anchorId"]
+                       and (not A.discoverable or (r3 and r3.get("name") == handle)))
     with open(os.path.join(OUT, "attempt-%s-%d.json" % (ALG_NAMES[alg], i)), "w") as f:
         json.dump(rec, f, indent=1)
     print(json.dumps({"algorithm": ALG_NAMES[alg], "handle": handle, "pass": rec["pass"],
@@ -280,8 +339,9 @@ def attempt(p, alg, i):
 
 def main():
     algs = [int(x) for x in A.algorithms.split(",") if x.strip()]
-    print("connect=%s attempts=%d algorithms=%s delay_pending=%.0f local=%s out=%s" % (
-        CONNECT, A.attempts, [ALG_NAMES.get(a, a) for a in algs], A.delay_pending, A.local_connect_dir or "-", OUT), flush=True)
+    print("connect=%s attempts=%d algorithms=%s delay_pending=%.0f local=%s bed=%s discoverable=%s out=%s" % (
+        CONNECT, A.attempts, [ALG_NAMES.get(a, a) for a in algs], A.delay_pending, A.local_connect_dir or "-",
+        (A.bed_node + " cid " + str(A.bed_cid)) if A.bed_node else "-", A.discoverable, OUT), flush=True)
     total = passed = 0
     with sync_playwright() as p:
         for i in range(A.attempts):
