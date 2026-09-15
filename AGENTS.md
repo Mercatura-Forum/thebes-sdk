@@ -33,6 +33,11 @@ never patch a vendored copy in an example.
 - Frontends call backend `*OrTrap` twins so rejected guards throw a reason
   instead of arriving as a status-success `#err` the SPA would swallow.
 - A release = tag `vX.Y.Z` here → examples refresh their vendored snapshot.
+- `runtime/passkey.js` and `runtime/memphis-connect.js` are copied, never forked.
+  Before and after any deploy of a copy run `npm run audit:copies:live`
+  (`tools/passkey-copies-audit.py --live`, the deployed bytes of every copy in
+  `tools/live-passkey-cids.txt` against this tree); exit 0 is the gate. The
+  retired-pattern table in that script is how a known-bad lineage is named.
 
 ## Related repositories
 

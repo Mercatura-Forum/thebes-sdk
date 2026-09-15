@@ -184,7 +184,11 @@ at the application's own origin only. See [`docs/memphis.md`](./docs/memphis.md)
 ```
 npm install
 npm run build      # tsc, emits lib/
-npm test           # the encoding oracle: the Candid wire bytes of two builds must agree
+npm test           # the encoding oracle (Candid wire bytes of two builds agree) and the
+                   # transport oracle (the passkey runtime against a scripted network)
+npm run audit:copies:live   # every deployed copy of the passkey runtime against this tree
+python3 tools/e2e-new-user.py   # browser battery: sign up, sign in, sign out, sign in again,
+                                # per algorithm, same device and cross device (needs Playwright)
 ```
 
 ## Contributing

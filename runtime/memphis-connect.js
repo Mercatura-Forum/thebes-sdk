@@ -219,7 +219,13 @@
   function buildUrl(connectUrl, app, opts, extra) {
     var url = connectUrl
       + "?app=" + encodeURIComponent(app)
-      + "&origin=" + encodeURIComponent(global.location.origin);
+      + "&origin=" + encodeURIComponent(global.location.origin)
+      // `hb=1`: this opener understands heartbeat messages, so the connect page
+      // may send them while a ceremony is running and the opener's timeout
+      // becomes a timeout on SILENCE, not on the whole sign-in. An opener that
+      // does not send this never receives one: an older copy of this file
+      // treated any message without `ok` as a failed sign-in.
+      + "&hb=1";
     // `handle` is a PREFILL ONLY, for an app that already asked the customer for
     // one so they are not made to type it twice. The connect page still owns the
     // field and the person may change it. Nothing is authorised by it.
@@ -302,7 +308,16 @@
 
   function connectViaPopup(app, opts) {
     var connectUrl = opts.connectUrl || CONNECT_URL;
+    // Two clocks. `timeoutMs` is how long the popup may stay SILENT: the
+    // connect page reports progress every few seconds while a ceremony runs
+    // (a passkey prompt open, the network confirming a step), and each report
+    // restarts this clock. `maxMs` is the ceiling on the whole sign-in. A
+    // single clock on the whole sign-in closes the popup in the middle of a
+    // legitimate slow one: a phone reached over a QR code, a chain confirming
+    // slowly, a person reading twelve words. None of those is the app's to
+    // cut short.
     var timeoutMs = opts.timeoutMs || 120000;
+    var maxMs = opts.maxMs || 15 * 60 * 1000;
 
     // ── The popup is opened SYNCHRONOUSLY, right here ──────────────────────
     // Not after an await, not in a .then. iOS Safari only allows a popup that
@@ -337,8 +352,18 @@
         global.removeEventListener("message", onMessage);
         clearInterval(poll);
         clearTimeout(timer);
+        clearTimeout(ceiling);
         if (!keepOpen) { try { if (win && !win.closed) win.close(); } catch (_) {} }
         fn(arg);
+      }
+
+      function armSilenceTimer() {
+        clearTimeout(timer);
+        timer = setTimeout(function () {
+          var timedOut = new Error("Sign-in timed out.");
+          timedOut.code = "TIMEOUT";
+          finish(reject, timedOut);
+        }, timeoutMs);
       }
 
       function onMessage(ev) {
@@ -349,6 +374,14 @@
         if (ev.origin !== new URL(connectUrl).origin) return;
         var d = ev.data;
         if (!d || d.__memphis !== 1 || d.app !== app) return;
+
+        // A heartbeat: the ceremony is alive. Restart the silence clock and
+        // let the page know what the popup is doing, if it asked.
+        if (d.heartbeat) {
+          armSilenceTimer();
+          if (typeof opts.onProgress === "function" && d.text) { try { opts.onProgress(String(d.text)); } catch (_) {} }
+          return;
+        }
 
         if (d.ok) {
           var who = sessionFrom(app, d);
@@ -375,11 +408,13 @@
         }
       }, 400);
 
-      var timer = setTimeout(function () {
+      var timer = null;
+      armSilenceTimer();
+      var ceiling = setTimeout(function () {
         var timedOut = new Error("Sign-in timed out.");
         timedOut.code = "TIMEOUT";
         finish(reject, timedOut);
-      }, timeoutMs);
+      }, maxMs);
     });
   }
 
@@ -399,7 +434,11 @@
    *   handle      prefill for the handle field; authorises nothing
    *   returnTo    redirect mode only; must be on this app's own origin
    *   connectUrl  override the Memphis connect page (tests, staging)
-   *   timeoutMs   popup mode only; default 120000
+   *   timeoutMs   popup mode only; how long the popup may stay silent, default
+   *               120000. The connect page reports progress while a ceremony
+   *               runs, and each report restarts this clock.
+   *   maxMs       popup mode only; ceiling on the whole sign-in, default 900000
+   *   onProgress  popup mode only; called with the connect page's stage text
    *   reuse       false to force a fresh ceremony even if a live token is held
    *
    * MUST be called inside a user gesture (a click). A popup opened outside one

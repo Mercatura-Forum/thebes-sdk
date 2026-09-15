@@ -29,6 +29,7 @@ RETIRED = {
         (re.compile(r"pubKeyCredParams:\s*\[\s*\{\s*type:\s*\"public-key\",\s*alg:\s*-7\s*\}\s*\]"), "ES256 only (pre Sep 13 algorithms fix)"),
         (re.compile(r"timeout:\s*60000"), "60 s ceremony timeout (pre Sep 14 cross-device fix)"),
         (re.compile(r"authenticatorSelection:\s*\{\s*userVerification"), "no residentKey (pre Aug 29 discoverable fix)"),
+        (re.compile(r"const deadline = Date\.now\(\) \+ 8000;"), "8 s receipt budget, no submission retry, no resumable registration (pre Sep 15 new-user fix)"),
     ],
     "memphis-connect.js": [
         (re.compile(r"function finish\(fn, arg\)\s*\{"), "popup closed on failure (pre Sep 14 keep-open fix)"),

@@ -416,6 +416,26 @@ All three sign the **same** challenge, so the anchor is admitted in one atomic
   handle before either.** A rule applied after twelve words have been written
   down voids those words for nothing, a cheap check placed behind an
   irreversible step is worse than no check at all.
+- **Before generating a phrase, finish what this browser already started.**
+  `register` and `claim_name` are two writes. When the network is slow the
+  runtime waits up to 90 s per write, retries a refused submission, and if it
+  still has to give up it keeps what it knew (the message hash, or the
+  registration reply) on this origin. `pk.resumePendingRegistration(handle)`
+  finishes that identity with no new phrase and no new passkey prompt, and
+  returns its session; call it first, and only run the ceremony when it returns
+  null. `signIn` and `signInOrRegister` do the same before answering that no
+  identity exists. A page that showed a fresh phrase and then resumed an earlier
+  anchor would leave the person holding twelve words that open nothing, which is
+  why the resume is explicit and comes first.
+
+**Transport errors are typed.** A slow or busy network is reported as what it is,
+never as a refusal: `MemphisReceiptTimeout` (submitted, not confirmed within the
+budget; `messageHash` and `method` on the error), `MemphisNetworkBusy` (every
+submission attempt was refused), `MemphisSubmittedButLost` (the call ran but its
+reply cannot be collected). `MemphisCanisterError` carries the canister's own
+sentence in `detail`. Register a stage-text callback with `pk.onProgress(cb)`
+so a person waiting on a slow confirmation sees that, rather than a frozen
+button; `useMemphis` and `<MemphisGate>` render it as `progress`.
 
 React apps get this for free: `<MemphisGate>` runs the whole ceremony, renders
 the phrase overlay, and exposes `phrase` / `confirmPhrase` / `cancelPhrase` /

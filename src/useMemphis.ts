@@ -32,6 +32,9 @@ type Passkey = {
   buildDeviceFactor: (challenge: Uint8Array, label: string) => Promise<FactorRegistration>
   buildRecoveryFactor: (challenge: Uint8Array, phrase: string) => Promise<FactorRegistration>
   registerWithFactors: (name: string, factors: FactorRegistration[]) => Promise<MemphisSession>
+  // A registration this browser started and did not confirm (older runtimes lack these).
+  resumePendingRegistration?: (name: string) => Promise<MemphisSession | null>
+  onProgress?: (cb: ((text: string) => void) | null) => void
 }
 type Recovery = { generatePhrase: () => Promise<string> }
 
@@ -125,8 +128,18 @@ export function useMemphis(): MemphisAuth {
       // Identity-durability P0: a lookup miss is a QUESTION for the human, not
       // a license to mint, and a sign-in must never fall through into creating
       // a second identity for a name that already exists.
+      if (p.onProgress) p.onProgress((text) => setProgress(text))
       const existing = await p.lookupAnchor(name)
       if (existing) { setSession(await p.signIn(name)); return }
+
+      // A registration this browser began and the network did not confirm in
+      // time is finished here, before a new phrase is generated: the anchor
+      // being finished holds the phrase from that attempt, and to the person
+      // it is the identity they just created, not one that does not exist.
+      if (p.resumePendingRegistration) {
+        const resumed = await p.resumePendingRegistration(name)
+        if (resumed) { setSession(resumed); return }
+      }
 
       const ok = typeof window !== 'undefined' && typeof window.confirm === 'function' &&
         window.confirm(`No Memphis identity exists for "${name}".\n\n` +
@@ -151,6 +164,7 @@ export function useMemphis(): MemphisAuth {
       phraseAnswer.current = null
       setPhrase(null)
       setProgress(undefined)
+      try { const p = pk(); if (p.onProgress) p.onProgress(null) } catch { /* not loaded */ }
       setBusy(false)
     }
   }, [runCeremony])

@@ -16,6 +16,10 @@
  *   saveSession(session)
  *   clearSession()               -> localStorage-only (legacy; does not revoke server-side)
  *   signOut()                    -> async; calls end_session on canister, then clearSession()
+ *   resumePendingRegistration(name) -> session | null; finishes a registration this browser
+ *                                   started and did not confirm (no new passkey prompt)
+ *   pendingRegistration()        -> { name, stage, at } | null
+ *   onProgress(cb)               -> stage text while a step waits on the network or the device
  *
  * The Memphis canister is at cid 921; RP_ID matches the page's origin
  * (memphis.mercaturaforum.com).
@@ -641,44 +645,203 @@
     }
 
     // ─── boundary transport ────────────────────────────────────────────────
+    //
+    // An update is two HTTP conversations: POST /api/call submits it and
+    // answers with the message hash; GET /api/receipt?hash= is polled until the
+    // chain has executed it. Between the two, the message sits in the ingress
+    // pool until a block carries it, and how long that takes is the chain's
+    // finality latency, which the client neither controls nor can predict.
+    //
+    // A budget shorter than the chain's worst finality latency turns a slow
+    // confirmation into a failure the client invented: the message executes
+    // anyway, the page reports an error, and for a new identity the sign-in
+    // that follows finds no handle yet and offers to create one. This transport
+    // waits as long as the chain can still execute the message, retries a
+    // refused submission, tolerates a failed poll, reports what it is doing,
+    // and when it does give up it says so with the message hash and keeps the
+    // hash so a later attempt collects the reply instead of repeating the
+    // write.
+    //
+    // Errors thrown here carry `code`:
+    //   MemphisNetworkBusy       every submission attempt was refused
+    //   MemphisSubmittedButLost  the call executed but its reply cannot be
+    //                            fetched (the reply was lost, or the boundary
+    //                            ran the same call twice and the hash we hold
+    //                            is the refused duplicate)
+    //   MemphisReceiptTimeout    submitted, not confirmed within the budget
+    //                            (`messageHash` and `method` on the error)
+    //   MemphisCanisterError     the canister refused the call (`detail`)
+
+    // How long a submitted message is waited for. The ingress pool keeps an
+    // unsigned envelope for five minutes and the passkey ceremony budget is
+    // 300 s; ninety seconds is well past a healthy confirmation and well
+    // inside what a slow chain can still deliver.
+    const RECEIPT_BUDGET_MS = 90000;
+    // Waits between submission attempts when the network refuses to take the
+    // message (back-pressure, 502, 503, 429, a dropped connection). Bounded:
+    // five retries, 27 s in all.
+    const SUBMIT_WAITS_MS = [1000, 2000, 4000, 8000, 12000];
+    const PENDING_CALL_KEY = "memphisPendingCallV1";
+
+    // Progress text for the page that is waiting on us. The connect page and
+    // the React layer render it; a page that never registers a callback loses
+    // nothing.
+    let progressCb = null;
+    function onProgress(cb) { progressCb = (typeof cb === "function") ? cb : null; }
+    function emitProgress(text) { try { if (progressCb) progressCb(text); } catch (_) {} }
+
+    function typedError(code, message, extra) {
+        const e = new Error(message);
+        e.code = code;
+        if (extra) for (const k of Object.keys(extra)) e[k] = extra[k];
+        return e;
+    }
+
+    // The last call that was submitted and not confirmed, so the next attempt
+    // can collect its reply rather than submit the same write again. One slot:
+    // the flows here never have two writes in flight.
+    function rememberPendingCall(method, hash) {
+        try { localStorage.setItem(PENDING_CALL_KEY, JSON.stringify({ method, hash, at: Date.now() })); } catch (_) {}
+    }
+    function loadPendingCall(method) {
+        try {
+            const raw = localStorage.getItem(PENDING_CALL_KEY);
+            if (!raw) return null;
+            const p = JSON.parse(raw);
+            if (!p || !p.hash || (method && p.method !== method)) return null;
+            // Past the pool's five-minute life the message can no longer execute.
+            if (!p.at || Date.now() - p.at > 5 * 60 * 1000) { clearPendingCall(); return null; }
+            return p;
+        } catch (_) { return null; }
+    }
+    function clearPendingCall() { try { localStorage.removeItem(PENDING_CALL_KEY); } catch (_) {} }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    // Whether the sender's first message has executed. The chain keeps one
+    // nonce per sender; every call here uses a fresh sender with nonce 0, so
+    // `next_nonce > 0` means "already executed", which is exactly what a
+    // resubmission must not repeat. Answered by one node, so a "0" can be a
+    // node that has not executed yet; the execution-time replay check is the
+    // backstop (see the receipt loop).
+    async function senderExecuted(senderHex) {
+        try {
+            const r = await fetch(BOUNDARY + "/api/next_nonce?sender=" + senderHex).then(x => x.json());
+            return Number(r && r.next_nonce) > 0;
+        } catch (_) { return false; }
+    }
+
+    // Submit once. Returns { hash } or { refused: <why> } for a refusal worth
+    // retrying; throws for a definite error.
+    async function submitOnce(method, argHex, senderHex) {
+        let res, body;
+        try {
+            res = await fetch(BOUNDARY + "/api/call", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ canister_id: MEMPHIS_CID, method, arg: argHex, sender: senderHex, nonce: 0 }),
+            });
+            body = await res.json().catch(() => ({}));
+        } catch (e) {
+            return { refused: "network: " + (e && e.message ? e.message : String(e)) };
+        }
+        const err = body && typeof body.error === "string" ? body.error : "";
+        if (res.status === 429 || res.status === 502 || res.status === 503 || /backpressure/i.test(err)) {
+            return { refused: err || ("HTTP " + res.status) };
+        }
+        if (err) throw typedError("MemphisCanisterError", "call: " + err, { detail: err, method });
+        if (!body || !body.message_hash) throw typedError("MemphisCanisterError", "call: missing message_hash in response", { method });
+        return { hash: body.message_hash };
+    }
+
+    // Poll one receipt until the budget runs out. Returns the reply bytes;
+    // throws MemphisCanisterError / MemphisSubmittedButLost; returns null when
+    // the budget is exhausted without an answer.
+    async function pollReceipt(method, hash, budgetMs) {
+        const t0 = Date.now();
+        let wait = 150, lastLifecycle = "submitted", saidSlow = false, saidVerySlow = false;
+        while (Date.now() - t0 < budgetMs) {
+            await sleep(wait);
+            wait = Math.min(2000, Math.round(wait * 1.5));
+            let rec = null;
+            try {
+                const r = await fetch(BOUNDARY + "/api/receipt?hash=" + hash);
+                rec = await r.json().catch(() => null);
+            } catch (_) { rec = null; }
+            // A poll that fails, or a node that has not seen the message
+            // (`unknown`), says nothing about the message: keep polling.
+            if (rec && rec.lifecycle) lastLifecycle = rec.lifecycle;
+            if (rec && rec.status === "success" && rec.reply) return hexToBytes(rec.reply);
+            if (rec && rec.status === "error") {
+                const detail = rec.error || "unknown";
+                if (/replay: nonce/i.test(detail)) {
+                    throw typedError("MemphisSubmittedButLost",
+                        "The network ran this call but its reply could not be collected (" + method + ").",
+                        { method, messageHash: hash, detail });
+                }
+                throw typedError("MemphisCanisterError", "canister error: " + detail, { method, messageHash: hash, detail });
+            }
+            const elapsed = Date.now() - t0;
+            if (elapsed > 5000 && !saidSlow) { saidSlow = true; emitProgress("The network is confirming this step, it can take a little longer than usual."); }
+            if (elapsed > 20000 && !saidVerySlow) { saidVerySlow = true; emitProgress("Still confirming. The chain is slow right now; this page keeps waiting for up to a minute and a half."); }
+        }
+        return null;
+    }
+
     async function memphisCallAwait(method, argBytes) {
         const argHex = bytesToHex(argBytes);
         // Anonymous calls need a fresh sender per submission, otherwise the
-        // validator's per-(sender, nonce) replay set rejects the second call
-        // from "sender=""" with "nonce 0 already used". We don't sign these
-        // envelopes (the canister auths via WebAuthn factor proofs, not
-        // msg_caller), so a random 32-byte sender is fine for transport.
+        // per-(sender, nonce) replay set rejects the second call from the same
+        // sender. These envelopes are not signed (the canister authenticates
+        // with WebAuthn proofs, not the caller), so a random 32-byte sender is
+        // the transport's identity for this one message.
         const sender = bytesToHex(randomBytes(32));
-        const callRes = await fetch(BOUNDARY + "/api/call", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-                canister_id: MEMPHIS_CID,
-                method,
-                arg: argHex,
-                sender,
-            }),
-        }).then(r => r.json());
-        if (callRes.error) throw new Error("call: " + callRes.error);
-        if (!callRes.message_hash) throw new Error("call: missing message_hash in response");
-        const hash = callRes.message_hash;
-        // Poll up to ~8 s, single-canister cluster finalises in ~200 ms,
-        // so this is generous but bounded.
-        const deadline = Date.now() + 8000;
-        let lastLifecycle = "submitted";
-        while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 150));
-            const recRes = await fetch(BOUNDARY + "/api/receipt?hash=" + hash);
-            const rec = await recRes.json().catch(() => ({}));
-            lastLifecycle = rec.lifecycle || lastLifecycle;
-            if (rec.status === "success" && rec.reply) {
-                return hexToBytes(rec.reply);
+        let hash = null, lastRefusal = null;
+        for (let attempt = 0; ; attempt++) {
+            const r = await submitOnce(method, argHex, sender);
+            if (r.hash) { hash = r.hash; break; }
+            lastRefusal = r.refused;
+            // A refusal can arrive after a node has taken the message (the
+            // boundary timed out on a reply it never relayed). Do not
+            // submit the write twice: if the sender has executed, the reply is
+            // gone and the caller is told so.
+            if (await senderExecuted(sender)) {
+                throw typedError("MemphisSubmittedButLost",
+                    "The network ran this call but its reply was lost (" + method + ").", { method, detail: lastRefusal });
             }
-            if (rec.status === "error") {
-                throw new Error("canister error: " + (rec.error || "unknown"));
+            if (attempt >= SUBMIT_WAITS_MS.length) {
+                throw typedError("MemphisNetworkBusy",
+                    "The network is busy right now and did not take this request (" + method + "). Nothing was created; try again in a minute.",
+                    { method, detail: lastRefusal });
             }
+            emitProgress("The network is busy, retrying automatically.");
+            await sleep(SUBMIT_WAITS_MS[attempt]);
         }
-        throw new Error("receipt poll timeout (last lifecycle=" + lastLifecycle + ")");
+        rememberPendingCall(method, hash);
+        const reply = await pollReceipt(method, hash, RECEIPT_BUDGET_MS);
+        if (reply) { clearPendingCall(); return reply; }
+        throw typedError("MemphisReceiptTimeout",
+            "The network has not confirmed this step yet (" + method + ", " + Math.round(RECEIPT_BUDGET_MS / 1000) + " s). Nothing was lost: the request is still queued, and trying again collects its result.",
+            { method, messageHash: hash });
+    }
+
+    // Collect the reply of a call that was submitted earlier and not confirmed
+    // in time. Returns the reply bytes, or null when there is nothing pending
+    // for `method` or it still has not executed within `budgetMs`.
+    async function collectPendingCall(method, budgetMs) {
+        const p = loadPendingCall(method);
+        if (!p) return null;
+        emitProgress("Checking whether the earlier request went through.");
+        let reply = null;
+        try {
+            reply = await pollReceipt(method, p.hash, budgetMs || 30000);
+        } catch (e) {
+            // Refused or lost: the earlier call is dead, a new one may be made.
+            clearPendingCall();
+            return null;
+        }
+        if (reply) clearPendingCall();
+        return reply;
     }
 
     function bytesToBase64(u8) {
@@ -951,58 +1114,195 @@
         // 2. Pair of WebAuthn ceremonies (create + immediate get over same challenge)
         const factor = await webauthnCreate(challenge, validated);
 
-        // 3. register([factor])
-        const regReply = await memphisCallAwait(
-            "register",
-            encVecFactorRegistration([
-                {
-                    credential_id: factor.credentialId,
-                    cose_pub_key_bytes: factor.cose_pub_key_bytes,
-                    authenticator_data: factor.authenticator_data,
-                    client_data_json: factor.client_data_json,
-                    signature: factor.signature,
-                },
-            ])
-        );
+        // 3. register([factor]) then claim_name, resumable between the two.
+        return await submitRegistration(validated, encVecFactorRegistration([
+            {
+                credential_id: factor.credentialId,
+                cose_pub_key_bytes: factor.cose_pub_key_bytes,
+                authenticator_data: factor.authenticator_data,
+                client_data_json: factor.client_data_json,
+                signature: factor.signature,
+            },
+        ]));
+    }
+
+    // ─── registration, resumable ───────────────────────────────────────────
+    //
+    // An identity is two writes: `register` mints the anchor and a session,
+    // `claim_name` binds the handle. A client that gives up between them
+    // leaves an anchor that no handle will ever find, with the person's
+    // passkeys bound to it, and a retry mints a second one. So what the
+    // client knows is written down at each step, on this origin:
+    //
+    //   stage "submitted"  : `register` is on the wire (its hash is in the
+    //                        pending-call slot); the reply may still arrive
+    //   stage "registered" : `register` answered; the session token and the
+    //                        anchor are held; `claim_name` has not confirmed
+    //
+    // `resumePendingRegistration(name)` finishes from either stage without a
+    // new passkey prompt and without a second anchor. `claim_name` is
+    // idempotent on the canister (the same identity claiming the same name
+    // again is Ok), so retrying it is always safe.
+    //
+    // Resume is explicit, by the same handle, and BEFORE a page generates a
+    // new recovery phrase: the anchor being resumed holds the phrase from the
+    // earlier attempt, and a page that showed a fresh phrase and then resumed
+    // would leave the person holding words that open nothing. A fresh
+    // registration under a name that has a pending record supersedes it.
+    const PENDING_REG_KEY = "memphisPendingRegistrationV1";
+
+    function savePendingRegistration(rec) {
+        try { localStorage.setItem(PENDING_REG_KEY, JSON.stringify(Object.assign({ at: Date.now() }, rec))); } catch (_) {}
+    }
+    function loadPendingRegistration(name) {
+        try {
+            const raw = localStorage.getItem(PENDING_REG_KEY);
+            if (!raw) return null;
+            const r = JSON.parse(raw);
+            if (!r || !r.name || !r.stage) return null;
+            if (name && r.name !== name) return null;
+            // A held session is good for the canister's session life; past a
+            // day nothing here can still be claimed.
+            if (!r.at || Date.now() - r.at > 24 * 60 * 60 * 1000) { clearPendingRegistration(); return null; }
+            return r;
+        } catch (_) { return null; }
+    }
+    function clearPendingRegistration() { try { localStorage.removeItem(PENDING_REG_KEY); } catch (_) {} }
+    /** The registration this browser has not finished, if any: { name, stage, at }. */
+    function pendingRegistration() {
+        const r = loadPendingRegistration(null);
+        return r ? { name: r.name, stage: r.stage, at: r.at } : null;
+    }
+
+    function sessionFromRegistration(validated, ok) {
+        return {
+            name: validated,
+            anchor_id_hex: bytesToHex(ok.anchor_id),
+            session_token_hex: bytesToHex(ok.session_token),
+            expires_at_ns: ok.expires_at_ns.toString(),
+            // Display tag = last 4 hex chars of anchor_id_hex. The canister
+            // returns the canonical value; an older canister without the
+            // field gets the same formula applied client-side.
+            display_tag: ok.display_tag || bytesToHex(ok.anchor_id).slice(-4),
+        };
+    }
+
+    // The registration write, from "on the wire" to "signed in".
+    async function submitRegistration(validated, regArgBytes) {
+        clearPendingCall();
+        savePendingRegistration({ name: validated, stage: "submitted" });
+        let regReply;
+        try {
+            regReply = await memphisCallAwait("register", regArgBytes);
+        } catch (e) {
+            // Refused outright: nothing was minted, nothing to resume.
+            if (e && (e.code === "MemphisCanisterError" || e.code === "MemphisNetworkBusy")) clearPendingRegistration();
+            throw e;
+        }
+        return await finishRegistration(validated, regReply);
+    }
+
+    async function finishRegistration(validated, regReply) {
         const regDec = decodeResultRecordReg(regReply);
         if (regDec.err) {
+            clearPendingRegistration();
             // Carry the typed variant + the canister's sentence so callers can
-            // react (e.g. INV-MEM-1 → run the multi-factor signup ceremony).
+            // react (e.g. INV-MEM-1 -> run the multi-factor signup ceremony).
             const e = new Error("register: " + (regDec.err.message || regDec.err.name));
             e.code = regDec.err.name;
             e.errId = regDec.err.id;
+            e.detail = regDec.err.message;
             throw e;
         }
-        const anchorIdHex = bytesToHex(regDec.ok.anchor_id);
-        const sessionTokenHex = bytesToHex(regDec.ok.session_token);
+        const session = sessionFromRegistration(validated, regDec.ok);
+        savePendingRegistration({ name: validated, stage: "registered", session });
+        return await claimForSession(validated, session);
+    }
 
-        // 4. claim_name (binds the handle to the per-app principal for THIS origin).
+    async function claimForSession(validated, session) {
+        emitProgress("Binding your handle to the new identity.");
         const claimReply = await memphisCallAwait(
             "claim_name",
-            encClaimNameArgs(regDec.ok.session_token, validated, location.origin, 0)
+            encClaimNameArgs(hexToBytes(session.session_token_hex), validated, location.origin, 0)
         );
         const claimDec = decodeResultText(claimReply);
-        if (claimDec.err) throw new Error("claim_name: " + claimDec.err.name);
-
-        const session = {
-            name: validated,
-            anchor_id_hex: anchorIdHex,
-            session_token_hex: sessionTokenHex,
-            expires_at_ns: regDec.ok.expires_at_ns.toString(),
-            // Display tag = last 4 hex chars of anchor_id_hex. The canister
-            // returns the canonical value in `regDec.ok.display_tag`; if that
-            // field is missing (older canister), fall back to deriving it
-            // client-side from anchor_id_hex (same formula, same result).
-            display_tag: regDec.ok.display_tag || anchorIdHex.slice(-4),
-        };
+        if (claimDec.err) {
+            const detail = claimDec.err.message || claimDec.err.name;
+            // The canister refused the claim: either the name went to someone
+            // else meanwhile, or the held session is no longer valid. In both
+            // cases this record cannot complete; a fresh registration can.
+            clearPendingRegistration();
+            const e = new Error("claim_name: " + detail);
+            e.code = /already taken/i.test(detail) ? "MemphisNameTaken" : claimDec.err.name;
+            e.detail = detail;
+            throw e;
+        }
+        clearPendingRegistration();
         saveSession(session);
         return session;
     }
 
+    /**
+     * Finish a registration this browser started and did not confirm, for
+     * `name`. Returns the session when it could be finished, null when there
+     * is nothing pending for that handle (or what was pending can no longer
+     * execute), and throws when the network is still not answering, in which
+     * case the record is kept and a later call resumes again.
+     */
+    async function resumePendingRegistration(name) {
+        const validated = validateName(name);
+        const rec = loadPendingRegistration(validated);
+        if (!rec) return null;
+        if (rec.stage === "registered" && rec.session && rec.session.session_token_hex) {
+            emitProgress("Finishing the identity you started.");
+            return await claimForSession(validated, rec.session);
+        }
+        if (rec.stage === "submitted") {
+            const reply = await collectPendingCall("register", 30000);
+            if (!reply) {
+                // Not executed within the wait, or dead: the record stays only
+                // while the hash is still alive in the pool.
+                if (!loadPendingCall("register")) clearPendingRegistration();
+                return null;
+            }
+            emitProgress("Finishing the identity you started.");
+            return await finishRegistration(validated, reply);
+        }
+        clearPendingRegistration();
+        return null;
+    }
+
+    // The name lookup, with the reads this browser has earned. A query goes
+    // to whichever node the boundary picks, and a node that has not executed
+    // a write yet answers as if it never happened. When THIS browser
+    // registered the handle, it knows better than one node's answer: the
+    // lookup is retried for a bounded while, and the anchor the registration
+    // returned is used if the query still misses (the canister refuses an
+    // anchor that does not exist, so nothing is trusted that it does not hold).
+    async function anchorForOwnName(validated) {
+        let anchorBytes = await lookupAnchor(validated);
+        if (anchorBytes) return anchorBytes;
+        const held = loadSession();
+        const own = held && held.name === validated && held.anchor_id_hex ? held : null;
+        if (!own) return null;
+        for (const wait of [500, 1000, 2000, 4000]) {
+            await sleep(wait);
+            anchorBytes = await lookupAnchor(validated);
+            if (anchorBytes) return anchorBytes;
+        }
+        return hexToBytes(own.anchor_id_hex);
+    }
+
     async function signIn(name) {
         const validated = validateName(name);
-        const anchorBytes = await lookupAnchor(validated);
-        if (!anchorBytes) throw new Error("no Memphis identity for " + validated + ", register first");
+        let anchorBytes = await anchorForOwnName(validated);
+        if (!anchorBytes) {
+            // A registration this browser did not finish is finished now,
+            // instead of telling the person they do not exist.
+            const resumed = await resumePendingRegistration(validated);
+            if (resumed) return resumed;
+            throw typedError("NameNotRegistered", "no Memphis identity for " + validated + ", register first", { nameRequested: validated });
+        }
         // 1. begin_authentication(anchor_id)
         const challengeReply = await memphisCallAwait("begin_authentication", encBlob(anchorBytes));
         const dec = decodeResultBlob(challengeReply);
@@ -1014,6 +1314,7 @@
         //    refuse if the asserted credential_id isn't bound to the anchor.)
         const assertion = await webauthnGet(challenge, []);
         // 3. authenticate
+        emitProgress("The network is confirming your sign-in.");
         const authReply = await memphisCallAwait("authenticate", encFactorAssertion({
             credential_id: assertion.credentialId,
             authenticator_data: assertion.authenticatorData,
@@ -1040,11 +1341,15 @@
     // INTO. If the name resolves, sign in. If it does not, the caller must
     // explicitly opt into creation (`{ confirmCreate: true }`) after asking the
     // user; otherwise a typed `NameNotRegistered` is thrown so the UI can
-    // confirm. A lookup miss must never re-register.
+    // confirm. A lookup miss must never re-register. A registration this
+    // browser started and did not confirm is finished first: to the person it
+    // is the identity they just created, and it must not read as absent.
     async function signInOrRegister(name, opts) {
         const validated = validateName(name);
-        const anchorBytes = await lookupAnchor(validated);
+        const anchorBytes = await anchorForOwnName(validated);
         if (anchorBytes) return signIn(validated);
+        const resumed = await resumePendingRegistration(validated);
+        if (resumed) return resumed;
         if (opts && opts.confirmCreate === true) return register(validated);
         const err = new Error("No Memphis identity exists for \"" + validated + "\".");
         err.code = "NameNotRegistered";
@@ -1444,31 +1749,7 @@
 
     async function registerWithFactors(name, factors) {
         const validated = validateName(name);
-        const regReply = await memphisCallAwait("register", encVecFactorRegistration(factors));
-        const regDec = decodeResultRecordReg(regReply);
-        if (regDec.err) {
-            const e = new Error("register: " + (regDec.err.message || regDec.err.name));
-            e.code = regDec.err.name;
-            e.detail = regDec.err.message;
-            throw e;
-        }
-        const anchorIdHex = bytesToHex(regDec.ok.anchor_id);
-        const sessionTokenHex = bytesToHex(regDec.ok.session_token);
-        const claimReply = await memphisCallAwait(
-            "claim_name",
-            encClaimNameArgs(regDec.ok.session_token, validated, location.origin, 0)
-        );
-        const claimDec = decodeResultText(claimReply);
-        if (claimDec.err) throw new Error("claim_name: " + (claimDec.err.message || claimDec.err.name));
-        const session = {
-            name: validated,
-            anchor_id_hex: anchorIdHex,
-            session_token_hex: sessionTokenHex,
-            expires_at_ns: regDec.ok.expires_at_ns.toString(),
-            display_tag: regDec.ok.display_tag || anchorIdHex.slice(-4),
-        };
-        saveSession(session);
-        return session;
+        return await submitRegistration(validated, encVecFactorRegistration(factors));
     }
 
     // ─── session storage ───────────────────────────────────────────────────
@@ -1716,6 +1997,11 @@
         buildDeviceFactor,
         buildRecoveryFactor,
         registerWithFactors,
+        // A registration this browser did not confirm: finish it, or ask.
+        resumePendingRegistration,
+        pendingRegistration,
+        // Stage text while a step waits on the network or the device.
+        onProgress,
         // Lower-level helpers, exposed for diagnostics.
         _memphisCallAwait: memphisCallAwait,
         _memphisQuery: memphisQuery,
