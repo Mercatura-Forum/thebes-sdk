@@ -33,6 +33,7 @@ RETIRED = {
     ],
     "memphis-connect.js": [
         (re.compile(r"function finish\(fn, arg\)\s*\{"), "popup closed on failure (pre Sep 14 keep-open fix)"),
+        (re.compile(r"var timeoutMs = opts\.timeoutMs \|\| 120000;\s*\n\s*\n\s*// ── The popup"), "single timeout on the whole sign-in, no heartbeat (pre Sep 15 silence-timeout fix)"),
     ],
 }
 SKIP_DIRS = {"node_modules", ".git", "target", "target-mayo5", ".cache", "__pycache__"}
