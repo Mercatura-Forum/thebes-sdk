@@ -20,6 +20,7 @@ type Boundary = {
   publicKey: () => string
   principalOf: (publicKey: string | Uint8Array) => string
   isPersistentIdentity: () => boolean
+  signCall: (cid: number | string, method: string, argHex: string) => Promise<{ sender: string; nonce: number; signature: string }>
   encodeArg: (v: unknown) => Uint8Array
   encodeArgs: (vs: unknown[]) => Uint8Array
   bytesToHex: (b: Uint8Array) => string

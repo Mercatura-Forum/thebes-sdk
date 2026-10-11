@@ -269,6 +269,16 @@
     principalOf: (publicKeyHexOrBytes) => h(principalOf(typeof publicKeyHexOrBytes === "string" ? d(publicKeyHexOrBytes) : publicKeyHexOrBytes)),
     isPersistentIdentity: () => persistentKey,
     callSigningPayload,
+    // For a client with its own transport: the signed fields of one /api/call
+    // body ({ sender, nonce, signature }), by this browser's key, with the next
+    // nonce. The client submits it and handles a replayed nonce itself.
+    signCall: async function (canisterId, method, argHex) {
+      await ready();
+      const arg = null == argHex ? m : argHex;
+      const nonce = nextNonce();
+      const signature = await signPayload(callSigningPayload(Number(canisterId), method, d(arg), keyRecord.publicKey, nonce));
+      return { sender: cached.publicKey, nonce, signature: h(signature) };
+    },
     callUpdate: async function (canisterId, method, argHex, opts) {
       opts = opts || {};
       await ready();

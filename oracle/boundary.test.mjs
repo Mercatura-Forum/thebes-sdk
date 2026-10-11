@@ -237,6 +237,17 @@ function chain(opts = {}) {
   check("5b naming this browser's own key is allowed (it is what gets signed)", c.calls.length === 1 && verifies(c.calls[0]), "");
 }
 
+// 5c. signCall: the signed fields for a client with its own transport, same key, growing nonces.
+{
+  const { b } = page(chain().script);
+  const arg = hex(b.encodeArgs(["own transport"]));
+  const f1 = await b.signCall(7001, "post", arg), f2 = await b.signCall("7001", "post", arg);
+  const body = (f) => ({ canister_id: 7001, method: "post", arg, ...f });
+  check("5c signCall returns fields that verify, by the browser key, with growing nonces",
+    verifies(body(f1)) && verifies(body(f2)) && f1.sender === b.publicKey() && f2.nonce > f1.nonce, JSON.stringify(f1));
+  check("5d RED: signCall's signature does not cover another method", !verifies({ ...body(f1), method: "other" }), "");
+}
+
 // 6. Queries name this browser's key, so caller-scoped reads match its updates.
 {
   const c = chain();
