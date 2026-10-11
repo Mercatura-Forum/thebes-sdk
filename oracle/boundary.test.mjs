@@ -97,6 +97,7 @@ function page(script, env = {}) {
     dispatchEvent: (ev) => { events.push(ev); return true; },
   };
   if (env.scriptSrc) ctx.document = { currentScript: { src: env.scriptSrc } };
+  if (env.inlineAt) ctx.document = { currentScript: { src: "" }, baseURI: env.inlineAt };
   ctx.window = ctx; ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx, { importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER });
@@ -274,6 +275,11 @@ function chain(opts = {}) {
   const rec = idb._dbs.get("thebes-boundary").get("keys").get("ed25519-v1");
   check("7 the noble path signs a verifying update", c.calls.length === 1 && verifies(c.calls[0]), JSON.stringify(c.calls[0]));
   check("7b and keeps that key across a reload", rec.kind === "noble" && page(c.script, { crypto: noEd, idb, ls }).b.identity() === b.identity(), rec.kind);
+  // A page that inlines boundary.js (no src): noble is loaded from beside the page.
+  const inl = chain();
+  const pi = page(inl.script, { crypto: noEd, inlineAt: new URL("../runtime/index.html", import.meta.url).href });
+  await pi.b.callUpdate(7001, "post", "4449444c0000");
+  check("7d an inlined boundary.js loads noble from beside the page and signs", inl.calls.length === 1 && verifies(inl.calls[0]), JSON.stringify(inl.calls[0] || {}));
   // Neither WebCrypto Ed25519 nor a URL to load noble from: a typed refusal and no request.
   const none = chain();
   const p2 = page(none.script, { crypto: noEd });

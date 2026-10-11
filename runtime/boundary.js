@@ -11,7 +11,9 @@
   // `identity()` compares the same bytes the canister saw as `msg.caller`.
   // The key record is versioned (`ed25519-v1`) so a later Memphis session
   // binding can bind this same key.
-  const SCRIPT_SRC = (typeof document !== "undefined" && document.currentScript && document.currentScript.src) || "";
+  // Where the noble fallback is loaded from: beside this file, or, when a page
+  // inlines this file (no src), beside the page.
+  const SCRIPT_SRC = (typeof document !== "undefined" && ((document.currentScript && document.currentScript.src) || document.baseURI)) || "";
   const NOBLE_ED25519_FILE = "noble-ed25519-3.1.0.js";
   const IDB_NAME = "thebes-boundary", IDB_STORE = "keys", KEY_ID = "ed25519-v1";
   const CACHE_KEY = "thebes_identity_v1", NONCE_KEY = "thebes_nonce_v1";
