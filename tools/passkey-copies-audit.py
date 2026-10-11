@@ -30,6 +30,7 @@ RETIRED = {
         (re.compile(r"timeout:\s*60000"), "60 s ceremony timeout (pre Sep 14 cross-device fix)"),
         (re.compile(r"authenticatorSelection:\s*\{\s*userVerification"), "no residentKey (pre Aug 29 discoverable fix)"),
         (re.compile(r"const deadline = Date\.now\(\) \+ 8000;"), "8 s receipt budget, no submission retry, no resumable registration (pre Sep 15 new-user fix)"),
+        (re.compile(r"sender: senderHex, nonce: 0 \}\)"), "unsigned call naming a sender: refused once the signed-sender gate is active (before the signed transport)"),
     ],
     "memphis-connect.js": [
         (re.compile(r"function finish\(fn, arg\)\s*\{"), "popup closed on failure (pre Sep 14 keep-open fix)"),

@@ -41,6 +41,9 @@
     "use strict";
 
     const MEMPHIS_CID = 921;
+    // Read while this file runs, the only time document.currentScript names it:
+    // the signing fallback below is loaded from beside this file.
+    const SCRIPT_SRC = (typeof document !== "undefined" && document.currentScript && document.currentScript.src) || "";
     const BOUNDARY = location.origin.includes("memphis.mercaturaforum.com")
         ? ""
         : "https://memphis.mercaturaforum.com";
@@ -758,6 +761,77 @@
 
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+    // ─── signed transport (INV-SENDER-AUTH, V150) ──────────────────────────
+    // The chain refuses an unsigned call that names a sender. Every update here
+    // is signed by an Ed25519 key made for that one message: the sender is the
+    // key's public key and nonce 0 is its first and only nonce. A resubmission
+    // of the same message carries the same sender and signature, so the
+    // replay checks below keep working unchanged. Memphis authenticates with
+    // the WebAuthn proofs in the argument, never with the caller, so a
+    // throwaway key means for the canister exactly what the random sender it
+    // replaces meant. The browser's own Ed25519 (WebCrypto) signs where it
+    // exists; elsewhere the audited noble-ed25519 file shipped beside this one
+    // is loaded once, on first use.
+    const NOBLE_ED25519_FILE = "noble-ed25519-3.1.0.js";
+    function u32be(n) {
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, n);
+        return b;
+    }
+    function u64be(n) {
+        const b = new Uint8Array(8);
+        new DataView(b.buffer).setBigUint64(0, BigInt(n));
+        return b;
+    }
+    function lenPrefixed(b) { return concat(u32be(b.length), b); }
+    // egypt-state message.rs IngressMessage::signing_payload() for a Call (tag 0x02).
+    function callSigningPayload(canisterId, method, argBytes, senderBytes, nonce) {
+        return concat(utf8.encode("egypt-l1-ingress-v1"), Uint8Array.of(0x02), u64be(canisterId),
+            lenPrefixed(utf8.encode(method)), lenPrefixed(argBytes), lenPrefixed(senderBytes), u64be(nonce));
+    }
+    let webCryptoEd25519 = true;
+    async function webCryptoKeyPair() {
+        if (!webCryptoEd25519) return null;
+        try {
+            return await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign"]);
+        } catch (_) {
+            webCryptoEd25519 = false;
+            return null;
+        }
+    }
+    let noblePromise = null;
+    function loadNoble() {
+        if (!noblePromise) {
+            noblePromise = SCRIPT_SRC
+                ? import(new URL(NOBLE_ED25519_FILE, SCRIPT_SRC).href)
+                : Promise.reject(new Error("the page did not load passkey.js from a URL"));
+            noblePromise.catch(() => { noblePromise = null; });
+        }
+        return noblePromise;
+    }
+    // { senderHex, signatureHex } for one Call to `canisterId`, signed by a new key.
+    async function signCall(canisterId, method, argBytes) {
+        const kp = await webCryptoKeyPair();
+        if (kp) {
+            const pub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+            const payload = callSigningPayload(canisterId, method, argBytes, pub, 0);
+            const sig = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, kp.privateKey, payload));
+            return { senderHex: bytesToHex(pub), signatureHex: bytesToHex(sig) };
+        }
+        let ed;
+        try {
+            ed = await loadNoble();
+        } catch (e) {
+            throw typedError("MemphisUnsupportedBrowser",
+                "This browser cannot sign the request: it has no Ed25519, and the signing library (" + NOBLE_ED25519_FILE + ") did not load.",
+                { method, detail: e && e.message ? e.message : String(e) });
+        }
+        const sk = ed.utils.randomSecretKey();
+        const pub = await ed.getPublicKeyAsync(sk);
+        const sig = await ed.signAsync(callSigningPayload(canisterId, method, argBytes, pub, 0), sk);
+        return { senderHex: bytesToHex(pub), signatureHex: bytesToHex(sig) };
+    }
+
     // Whether the sender's first message has executed. The chain keeps one
     // nonce per sender; every call here uses a fresh sender with nonce 0, so
     // `next_nonce > 0` means "already executed", which is exactly what a
@@ -773,13 +847,16 @@
 
     // Submit once. Returns { hash } or { refused: <why> } for a refusal worth
     // retrying; throws for a definite error.
-    async function submitOnce(method, argHex, senderHex) {
+    async function submitOnce(method, argHex, signed) {
         let res, body;
         try {
             res = await fetch(BOUNDARY + "/api/call", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ canister_id: MEMPHIS_CID, method, arg: argHex, sender: senderHex, nonce: 0 }),
+                body: JSON.stringify({
+                    canister_id: MEMPHIS_CID, method, arg: argHex,
+                    sender: signed.senderHex, nonce: 0, signature: signed.signatureHex,
+                }),
             });
             body = await res.json().catch(() => ({}));
         } catch (e) {
@@ -830,15 +907,15 @@
 
     async function memphisCallAwait(method, argBytes) {
         const argHex = bytesToHex(argBytes);
-        // Anonymous calls need a fresh sender per submission, otherwise the
-        // per-(sender, nonce) replay set rejects the second call from the same
-        // sender. These envelopes are not signed (the canister authenticates
-        // with WebAuthn proofs, not the caller), so a random 32-byte sender is
-        // the transport's identity for this one message.
-        const sender = bytesToHex(randomBytes(32));
+        // A fresh sender per message, otherwise the per-(sender, nonce) replay
+        // set rejects the second call from the same sender. The sender is the
+        // public key of a key made for this message (see "signed transport");
+        // every resubmission below sends the same signed message.
+        const signed = await signCall(MEMPHIS_CID, method, argBytes);
+        const sender = signed.senderHex;
         let hash = null, lastRefusal = null;
         for (let attempt = 0; ; attempt++) {
-            const r = await submitOnce(method, argHex, sender);
+            const r = await submitOnce(method, argHex, signed);
             if (r.hash) { hash = r.hash; break; }
             lastRefusal = r.refused;
             // A refusal can arrive after a node has taken the message (the

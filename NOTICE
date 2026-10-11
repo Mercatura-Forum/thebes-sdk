@@ -3,8 +3,13 @@ Copyright (c) 2026 Mercatura Forum
 
 The shared frontend developer SDK for the Thebes Layer 1 example applications:
 a browser boundary client, a Memphis passkey authentication client, a typed
-query/update layer, and React hooks. It is implemented in TypeScript with no
-third-party runtime dependencies.
+query/update layer, and React hooks. It is implemented in TypeScript with one
+third-party runtime file: runtime/noble-ed25519-3.1.0.js, the unmodified
+index.js of @noble/ed25519 3.1.0 (MIT License, (c) 2019 Paul Miller,
+https://github.com/paulmillr/noble-ed25519; npm integrity verified at
+download; SHA-256 fe893bfb9286c67892a45c18537035eab3325bc723bb2855ddcb9e9cb57df9aa).
+passkey.js loads it only in a browser without WebCrypto Ed25519, to sign
+updates.
 
 The Motoko backend library is distributed separately as thebes-lib
 (https://github.com/Mercatura-Forum/thebes-lib).

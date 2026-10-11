@@ -12,13 +12,13 @@ import { webcrypto } from "node:crypto";
 
 const SRC = readFileSync(new URL("../runtime/passkey.js", import.meta.url), "utf8");
 
-function runtime(script) {
+function runtime(script, opts = {}) {
   const store = new Map();
   let now = 1_000_000;
   const timers = [];
   const ctx = {
     console, TextEncoder, TextDecoder, Uint8Array, BigInt, Map, Promise, Error, Number, Math, JSON, Object, Array, String, Symbol,
-    crypto: webcrypto, btoa: (s) => Buffer.from(s, "binary").toString("base64"), atob: (s) => Buffer.from(s, "base64").toString("binary"),
+    crypto: opts.crypto || webcrypto, btoa: (s) => Buffer.from(s, "binary").toString("base64"), atob: (s) => Buffer.from(s, "base64").toString("binary"),
     location: { origin: "https://memphis.mercaturaforum.com" },
     localStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
     sessionStorage: { getItem: (k) => (store.has("s:" + k) ? store.get("s:" + k) : null), setItem: (k, v) => store.set("s:" + k, String(v)), removeItem: (k) => store.delete("s:" + k) },
@@ -30,9 +30,11 @@ function runtime(script) {
     clearTimeout: () => {},
     fetch: async (url, init) => script(url, init, () => now),
   };
+  if (opts.scriptSrc) ctx.document = { currentScript: { src: opts.scriptSrc } };
+  ctx.URL = URL;
   ctx.window = ctx; ctx.globalThis = ctx;
   vm.createContext(ctx);
-  vm.runInContext(SRC, ctx);
+  vm.runInContext(SRC, ctx, { importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER });
   // Drive the virtual clock: run every due timer, jumping to the earliest, until none remain.
   async function settle(promise) {
     let done = false, out, err;
@@ -265,6 +267,73 @@ const FACTOR = (cred) => ({ credential_id: cred, cose_pub_key_bytes: new Uint8Ar
   check("11 a lost register_v2 reply is recovered from the credential: one register, then begin_authentication, authenticate, claim_name_v2",
     calls.join(",") === "register_v2,begin_authentication,authenticate,claim_name_v2" && session && session.anchor_id_hex.startsWith("9efd862b"),
     calls.join(",") + " " + (session && session.anchor_id_hex));
+}
+
+// ── every update is signed by the key it names ──
+// The payload is rebuilt here independently of the runtime, from egypt-state message.rs
+// IngressMessage::signing_payload() for a Call: domain, 0x02, cid u64be, then u32be-length-
+// prefixed method / arg / sender, then nonce u64be.
+function callPayload(cid, method, arg, sender, nonce) {
+  const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+  const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
+  const lp = (b) => Buffer.concat([u32(b.length), Buffer.from(b)]);
+  return Buffer.concat([Buffer.from("egypt-l1-ingress-v1"), Buffer.from([2]), u64(cid), lp(Buffer.from(method)), lp(arg), lp(sender), u64(nonce)]);
+}
+async function verifies(body, method, arg) {
+  if (!body.signature || body.signature.length !== 128 || body.nonce !== 0 || body.sender.length !== 64) return false;
+  const sender = Buffer.from(body.sender, "hex");
+  const key = await webcrypto.subtle.importKey("raw", sender, { name: "Ed25519" }, false, ["verify"]);
+  return webcrypto.subtle.verify({ name: "Ed25519" }, key, Buffer.from(body.signature, "hex"), callPayload(921, method, arg, sender, 0));
+}
+check("12-vector the test's payload layout is the node's", callPayload(0x0102030405060708n, "ab", Buffer.from([9]), Buffer.from([10, 11]), 0x1112131415161718n).toString("hex") ===
+  Buffer.from("egypt-l1-ingress-v1").toString("hex") + "02" + "0102030405060708" + "0000000261" + "62" + "0000000109" + "000000020a0b" + "1112131415161718");
+
+// 12. Every submission carries an Ed25519 signature over the node's payload; a resubmission of the
+//     same message sends the same sender and signature; a second message gets a new key.
+{
+  const bodies = [];
+  let attempts = 0;
+  const { pk, settle } = runtime((url, init) => {
+    if (url.endsWith("/api/call")) { attempts++; bodies.push(JSON.parse(init.body)); return attempts === 1 ? json({ status: "error", error: "rss_backpressure" }, 503) : json({ queued: true, message_hash: "dd".repeat(32) }); }
+    if (url.includes("/api/next_nonce")) return json({ next_nonce: 0, is_fresh_sender: true });
+    if (url.includes("/api/receipt")) return json({ found: true, status: "success", lifecycle: "success", reply: HEX_REPLY });
+    throw new Error("unexpected " + url);
+  });
+  const arg = new Uint8Array([0x44, 0x49, 0x44, 0x4c, 0, 1, 0x71, 3, 0x61, 0x62, 0x63]);
+  await settle(pk._memphisCallAwait("begin_authentication", arg));
+  await settle(pk._memphisCallAwait("begin_authentication", arg));
+  const ok = await Promise.all(bodies.map((b) => verifies(b, "begin_authentication", arg)));
+  check("12 every submission is signed by the key it names, over the node's payload", bodies.length === 3 && ok.every(Boolean), `bodies=${bodies.length} verified=${ok}`);
+  check("12b a resubmission sends the same signed message", bodies[0].sender === bodies[1].sender && bodies[0].signature === bodies[1].signature);
+  check("12c a new message gets a new key", bodies[2].sender !== bodies[0].sender, `${bodies[0].sender.slice(0, 12)} / ${bodies[2].sender.slice(0, 12)}`);
+  const tampered = { ...bodies[2], arg: "00" };
+  check("12d RED control: the signature does not cover a different argument", !(await verifies(tampered, "begin_authentication", new Uint8Array([0]))));
+}
+
+// 13. A browser without WebCrypto Ed25519 signs with the noble-ed25519 file shipped beside passkey.js.
+const noEd25519 = { getRandomValues: (a) => webcrypto.getRandomValues(a), subtle: new Proxy(webcrypto.subtle, {
+  get(t, k) {
+    if (k === "generateKey") return async (alg, ...rest) => { if (alg && alg.name === "Ed25519") throw new DOMException("Unrecognized name.", "NotSupportedError"); return t.generateKey(alg, ...rest); };
+    const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+  } }) };
+{
+  const bodies = [];
+  const { pk, settle } = runtime((url, init) => {
+    if (url.endsWith("/api/call")) { bodies.push(JSON.parse(init.body)); return json({ queued: true, message_hash: "ee".repeat(32) }); }
+    if (url.includes("/api/receipt")) return json({ found: true, status: "success", lifecycle: "success", reply: HEX_REPLY });
+    throw new Error("unexpected " + url);
+  }, { crypto: noEd25519, scriptSrc: new URL("../runtime/passkey.js", import.meta.url).href });
+  const arg = new Uint8Array([0x44, 0x49, 0x44, 0x4c, 0, 0]);
+  let err = null;
+  try { await settle(pk._memphisCallAwait("end_session", arg)); } catch (e) { err = e; }
+  check("13 without WebCrypto Ed25519 the shipped noble-ed25519 signs a valid message", !err && bodies.length === 1 && await verifies(bodies[0], "end_session", arg), err ? err.message : `verified=${bodies.length && await verifies(bodies[0], "end_session", arg)}`);
+}
+{
+  let calls = 0;
+  const { pk, settle } = runtime((url) => { if (url.endsWith("/api/call")) calls++; throw new Error("unexpected " + url); }, { crypto: noEd25519 });
+  let err = null;
+  try { await settle(pk._memphisCallAwait("end_session", new Uint8Array(6))); } catch (e) { err = e; }
+  check("13b with neither, the error is typed and nothing unsigned is sent", err && err.code === "MemphisUnsupportedBrowser" && calls === 0, err && (err.code + " calls=" + calls));
 }
 
 console.log(failures ? `\n  ${failures} failing` : "\n  transport: every case holds");

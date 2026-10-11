@@ -23,6 +23,7 @@
     },
     "./boundary.js": "./runtime/boundary.js",
     "./passkey.js": "./runtime/passkey.js",
+    "./noble-ed25519-3.1.0.js": "./runtime/noble-ed25519-3.1.0.js",
     "./recovery.js": "./runtime/recovery.js",
     "./runtime/*": "./runtime/*",
     "./memphis-connect.js": "./runtime/memphis-connect.js",
