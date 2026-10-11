@@ -4,7 +4,8 @@
  *   • query / update calls to a Motoko backend (Candid-encoded args)
  *   • raw-JSON calls to the Rust media contract (its methods take serde_json)
  *   • a chunked media upload that drives start → store_chunk → finish
- *   • the persisted browser identity (a stable per-browser sender principal)
+ *   • the persisted browser identity: one Ed25519 key per browser that signs
+ *     every update; identity() is the principal the canister sees as msg.caller
  *
  * Why wrap rather than reimplement: boundary.js is the deployed, battle-tested
  * client (Candid LEB128 + receipt polling + identity). We add types + the media
@@ -15,6 +16,10 @@
 type Boundary = {
   BOUNDARY: string
   identity: () => string
+  ready: () => Promise<string>
+  publicKey: () => string
+  principalOf: (publicKey: string | Uint8Array) => string
+  isPersistentIdentity: () => boolean
   encodeArg: (v: unknown) => Uint8Array
   encodeArgs: (vs: unknown[]) => Uint8Array
   bytesToHex: (b: Uint8Array) => string
@@ -46,9 +51,22 @@ function boundary(): Boundary {
   return b
 }
 
-/** Stable per-browser identity (28-byte sender persisted in localStorage). */
+/** This browser's principal: SHA-224(DER(pk)) ‖ 0x02 of its Ed25519 key, the
+ *  `msg.caller` the canister sees for every update this browser signs. Throws
+ *  `ThebesIdentityNotReady` on a first visit until `ready()` resolves. */
 export function identity(): string {
   return boundary().identity()
+}
+
+/** Resolves (to identity()) once this browser's key is loaded or made. Await it
+ *  before the first render that reads identity(). */
+export function ready(): Promise<string> {
+  return boundary().ready()
+}
+
+/** This browser's raw Ed25519 public key (hex), the `sender` it signs as. */
+export function publicKey(): string {
+  return boundary().publicKey()
 }
 
 export const EMPTY_ARGS_HEX = (): string => boundary().EMPTY_ARGS_HEX

@@ -115,27 +115,40 @@ function main() {
     console.log(`  [${tag}] ${k.padEnd(26)} ${shown}${ok ? '' : `  !=  ${b[k]}`}`)
   }
 
-  // Independently confirm the two sources agree on the transport envelope
-  // field (canister_id, the cluster API's name for it) and are otherwise
-  // identical.
+  // Independently confirm, at the source level, that the Candid codec the two
+  // builds run is the same text: the helpers before `const m="4449444c0000"`
+  // and the encode/decode methods of window.EgyptBoundary. The transport after
+  // them differs on purpose (the canonical copy signs every update with
+  // the browser's Ed25519 key), so it is checked on its own: the canonical
+  // copy names `canister_id`, sends a signature on every update and keeps no
+  // unsigned update path.
   const canonSrc = readFileSync(join(ROOT, 'runtime/boundary.js'), 'utf8')
   const ecomSrc = readFileSync(join(ROOT, 'oracle/boundary.ecommerce.js'), 'utf8')
-  const canonField = canonSrc.includes('canister_id:Number(t)') && !canonSrc.includes('contract_id:Number(t)')
+  const codecOf = (src) => {
+    const head = src.slice(0, src.indexOf('const m="4449444c0000"'))
+    const a = src.indexOf('encodeArg:function'), b = src.indexOf(',bytesToHex:h')
+    return a < 0 || b < 0 || head.length === 0 ? null : head + '\n' + src.slice(a, b)
+  }
+  const canonCodec = codecOf(canonSrc), ecomCodec = codecOf(ecomSrc)
+  const codecIdentical = canonCodec !== null && canonCodec === ecomCodec
+  const canonField = canonSrc.includes('canister_id: Number(canisterId)') && !canonSrc.includes('contract_id')
   const ecomField = ecomSrc.includes('canister_id:Number(t)')
-  const restIdentical = canonSrc.trim() === ecomSrc.trim()
+  const callBody = canonSrc.slice(canonSrc.indexOf('callUpdate:'), canonSrc.indexOf('callQuery:'))
+  const signedOnly = /signature: h\(signature\)/.test(callBody) && !/sender:\s*s\b|egypt_sender/.test(canonSrc)
 
-  console.log('\n  Transport-envelope drift check:')
+  console.log('\n  Source checks:')
+  console.log(`  [${codecIdentical ? '  ok ' : 'FAIL'}] Candid codec source identical`)
   console.log(`  [${canonField ? '  ok ' : 'FAIL'}] canonical uses transport field  canister_id`)
   console.log(`  [${ecomField ? '  ok ' : 'FAIL'}] e-commerce uses transport field canister_id`)
-  console.log(`  [${restIdentical ? '  ok ' : 'FAIL'}] sources identical`)
+  console.log(`  [${signedOnly ? '  ok ' : 'FAIL'}] canonical signs every update, no unsigned sender path`)
 
-  const driftOk = canonField && ecomField && restIdentical
+  const driftOk = codecIdentical && canonField && ecomField && signedOnly
   if (!driftOk) fails++
 
   console.log('')
   if (fails === 0) {
     console.log('  ✓ PASS: Candid wire encoding/decoding is BYTE-IDENTICAL across both')
-    console.log('    builds, and the two sources agree on the transport envelope.\n')
+    console.log('    builds, the codec source is identical, and the canonical transport is signed.\n')
     process.exit(0)
   }
   console.log(`  ✗ FAIL: ${fails} divergence(s). This is a wire regression; do NOT ship.\n`)

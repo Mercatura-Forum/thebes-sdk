@@ -45,7 +45,7 @@
     "oracle": "node oracle/encode-diff.mjs",
     "audit:copies": "python3 tools/passkey-copies-audit.py",
     "audit:copies:live": "python3 tools/passkey-copies-audit.py --live",
-    "test": "node oracle/encode-diff.mjs && node oracle/transport.test.mjs"
+    "test": "node oracle/encode-diff.mjs && node oracle/transport.test.mjs && node oracle/boundary.test.mjs"
   },
   "peerDependencies": {
     "react": ">=18"
