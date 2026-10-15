@@ -10,7 +10,8 @@ are written against. TypeScript and plain JavaScript. Apache 2.0.
 
 - **One boundary client.** `runtime/boundary.js` encodes and decodes Candid by
   hand, keeps a persisted browser identity, submits calls and polls receipts
-  against the cluster API. No generated bindings, no bundler required.
+  against the cluster API. Calls are signed by the browser's own Ed25519 key.
+  No generated bindings, no bundler required.
 - **Passkey identity on any domain.** `passkey.js` runs the WebAuthn ceremony on
   the Memphis origin; `memphis-connect.js` opens that ceremony from an app on
   its own domain and hands back a token minted for that origin only. The list
@@ -76,7 +77,8 @@ and `motoko/thebes-lib`) so that it builds self-contained; this repository and
 
 | Path | What it is |
 | --- | --- |
-| `runtime/boundary.js` | The browser boundary client (`window.EgyptBoundary`): Candid encode and decode, a persisted browser identity, call submission and receipt polling. |
+| `runtime/boundary.js` | The browser boundary client (`window.EgyptBoundary`): Candid encode and decode, a persisted browser identity (one Ed25519 key per browser, kept in IndexedDB) that signs every update, call submission and receipt polling. `identity()` is the principal a contract sees as `msg.caller`; on a first visit await `ready()` before reading it. |
+| `runtime/noble-ed25519-3.1.0.js` | The unmodified `@noble/ed25519` 3.1.0 file (MIT). `boundary.js` and `passkey.js` load it from beside themselves only in a browser without WebCrypto Ed25519. Ship it next to them. |
 | `runtime/passkey.js` | The Memphis passkey client (`window.MemphisPasskey`): the WebAuthn ceremony, the three-factor signup, sessions. Runs on the Memphis origin only (see Identity). |
 | `runtime/recovery.js` | The recovery-phrase factor: a BIP39 phrase whose derived key registers as a factor and signs in like a passkey. Loaded alongside `passkey.js`. |
 | `runtime/memphis-connect.js` | `window.memphis.connect()`: sign-in for an application served from its own domain, as a popup or a full-page redirect. |
@@ -133,7 +135,7 @@ Add the SDK as a pinned dependency; no registry account is required:
 
 ```jsonc
 // package.json
-{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.4.0" } }
+{ "dependencies": { "@thebes/sdk": "github:Mercatura-Forum/thebes-sdk#v0.5.0" } }
 ```
 
 ```ts
@@ -148,7 +150,7 @@ Memphis origin):
 ```jsonc
 // package.json scripts
 {
-  "sync-sdk": "mkdir -p public && cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/memphis-connect.js public/",
+  "sync-sdk": "mkdir -p public && cp node_modules/@thebes/sdk/runtime/boundary.js node_modules/@thebes/sdk/runtime/noble-ed25519-3.1.0.js node_modules/@thebes/sdk/runtime/memphis-connect.js public/",
   "dev": "npm run sync-sdk && vite",
   "build": "npm run sync-sdk && tsc -b && vite build"
 }
@@ -159,6 +161,18 @@ Memphis origin):
 <script src="./boundary.js"></script>
 <script src="./memphis-connect.js"></script>
 ```
+
+Every update is signed by the browser's own key, made on the first visit. Wait
+for it once before the first render that reads `identity()`:
+
+```ts
+import { ready } from '@thebes/sdk'
+ready().then(render, render)
+```
+
+The asset contracts serve `.js` files with a one-hour cache. When a runtime
+file changes, give its script tag a version (`./boundary.js?v=<md5-8>`) so a
+returning browser loads the new copy.
 
 ## The backend library
 

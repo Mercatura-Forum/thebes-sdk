@@ -28,8 +28,10 @@ never patch a vendored copy in an example.
 
 - The boundary decodes `vec record` of scalars, single records travel as
   0-or-1-element arrays, never bare options; scalars as `[{ field = text }]`.
-- Principals are 56-char hex everywhere (`identity()`, `decodeVecRecord`,
-  `encodeArg({type:'principal'})`).
+- Principals are hex everywhere (`identity()`, `decodeVecRecord`,
+  `encodeArg({type:'principal'})`). `identity()` is the 29-byte self-authenticating
+  principal of the browser's Ed25519 key (58 hex chars), the `msg.caller` of its
+  signed updates; on a first visit it is ready only after `ready()` resolves.
 - Frontends call backend `*OrTrap` twins so rejected guards throw a reason
   instead of arriving as a status-success `#err` the SPA would swallow.
 - A release = tag `vX.Y.Z` here → examples refresh their vendored snapshot.
