@@ -23,12 +23,19 @@
  *   signInDiscoverable()         -> session; the passkey on this device chooses the identity,
  *                                   no handle typed (canister capability "discoverable_authentication")
  *   capabilities() / hasCapability(name) -> what the canister lists beyond the original surface
+ *   beginDeviceLink(origin) / deviceLinkInfo(link) / claimDeviceLink(link)
+ *                                -> a computer signed in from a phone (capability "device_link")
+ *   approveDeviceLink(link, code) -> the phone's half of it
+ *
+ * A handle sign-in offers only that identity's passkeys when the canister
+ * lists "credentials_for_anchor".
  *
  * The Memphis canister is at cid 921; RP_ID matches the page's origin
  * (memphis.mercaturaforum.com).
  *
- * REGISTRATION TAKES THREE FACTORS (MIN_FACTORS_AT_SIGNUP = 3): a device
- * passkey, a second passkey, and a recovery phrase. `register(name)` below
+ * REGISTRATION TAKES SEVERAL FACTORS: a device passkey, a second passkey and
+ * a recovery phrase, or, where the canister lists "signup_two_factors", a
+ * device passkey and the recovery phrase. `register(name)` below
  * sends ONE and is kept only for a canister that still accepts that; the
  * identity contract refuses it with
  * `InvariantViolation { id = "INV-MEM-1"; details = ... }` (a different
@@ -382,6 +389,42 @@
         return new Uint8Array(out);
     }
 
+    // Encode `(blob, text, FactorAssertion)` for approve_device_link. Same type
+    // table as encFactorAssertion: T0 = blob, T1 = the record over T0.
+    function encLinkApprovalArgs(linkId, code, assertion) {
+        const sorted = FACTOR_ASSERT_FIELDS
+            .map(([n, t]) => ({ name: n, hash: candidFieldHash(n), t }))
+            .sort((a, b) => a.hash - b.hash);
+        const codeBytes = utf8.encode(code);
+        const out = [];
+        out.push(0x44, 0x49, 0x44, 0x4c);
+        out.push(...uleb(2));
+        out.push(...sleb(TY.VEC));
+        out.push(...sleb(TY.BLOB_BYTES));
+        out.push(...sleb(TY.RECORD));
+        out.push(...uleb(sorted.length));
+        for (const f of sorted) {
+            out.push(...uleb(f.hash));
+            out.push(...sleb(0));
+        }
+        // 3 args: T0, text, T1
+        out.push(...uleb(3));
+        out.push(...sleb(0));
+        out.push(...sleb(TY.TEXT));
+        out.push(...sleb(1));
+        out.push(...uleb(linkId.length));
+        for (const b of linkId) out.push(b);
+        out.push(...uleb(codeBytes.length));
+        for (const b of codeBytes) out.push(b);
+        for (const fd of sorted) {
+            const v = assertion[fd.name];
+            if (!(v instanceof Uint8Array)) throw new Error("assertion field " + fd.name + " must be Uint8Array");
+            out.push(...uleb(v.length));
+            for (const b of v) out.push(b);
+        }
+        return new Uint8Array(out);
+    }
+
     // Encode `(blob, text, text, nat64)` for claim_name.
     function encClaimNameArgs(token, name, origin, version) {
         const tokenBytes = token instanceof Uint8Array ? token : hexToBytes(token);
@@ -577,6 +620,68 @@
             }
         }
         return { ok: rec };
+    }
+
+    // Read one record field value at `off`: blob, text, nat64, bool, or
+    // opt text. Returns [value, newOff].
+    function readFieldValue(u8, off, t) {
+        if (t === "blob" || t === "text") {
+            const [len, ax] = readUleb(u8, off); off = ax;
+            const bytes = u8.slice(off, off + Number(len));
+            return [t === "text" ? utf8d.decode(bytes) : bytes, off + Number(len)];
+        }
+        if (t === "nat64") {
+            let v = 0n;
+            for (let i = 0n; i < 8n; i++) v |= BigInt(u8[off + Number(i)]) << (i * 8n);
+            return [v, off + 8];
+        }
+        if (t === "bool") return [u8[off] === 1, off + 1];
+        if (t === "opttext") {
+            if (u8[off] === 0) return [null, off + 1];
+            return readFieldValue(u8, off + 1, "text");
+        }
+        throw new Error("unsupported field type " + t);
+    }
+
+    // Decode `variant { Ok : record {...}; Err }` whose fields may also be bool
+    // or opt text (the device-link records).
+    function decodeResultRecordAny(replyBytes, fields) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const [tag, a1] = readUleb(replyBytes, off); off = a1;
+        if (tag !== 0n) return { err: extractErrorTag(replyBytes, off, tag) };
+        const rec = {};
+        for (const fd of sortedFieldOrder(fields)) {
+            const [v, next] = readFieldValue(replyBytes, off, fd.t);
+            rec[fd.name] = v; off = next;
+        }
+        return { ok: rec };
+    }
+
+    // Decode `(opt record {...})`: null when absent.
+    function decodeOptRecord(replyBytes, fields) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        if (replyBytes[off++] === 0) return null;
+        const rec = {};
+        for (const fd of sortedFieldOrder(fields)) {
+            const [v, next] = readFieldValue(replyBytes, off, fd.t);
+            rec[fd.name] = v; off = next;
+        }
+        return rec;
+    }
+
+    // Decode `(vec blob)`, credentials_for_anchor.
+    function decodeVecBlob(replyBytes) {
+        let off = expectDidlMagic(replyBytes);
+        off = skipTypeTable(replyBytes, off);
+        const [n, a] = readUleb(replyBytes, off); off = a;
+        const out = [];
+        for (let i = 0; i < Number(n); i++) {
+            const [len, b] = readUleb(replyBytes, off); off = b;
+            out.push(replyBytes.slice(off, off + Number(len))); off += Number(len);
+        }
+        return out;
     }
 
     // Decode `(opt blob)` reply for anchor_for_name / lookup_name.
@@ -905,7 +1010,11 @@
         return null;
     }
 
-    async function memphisCallAwait(method, argBytes) {
+    // `opts.remember === false`: a call nothing would ever resume (the device
+    // link) is not recorded as the pending call, so it cannot displace or clear
+    // the record of a registration still waiting on the network.
+    async function memphisCallAwait(method, argBytes, opts) {
+        const remember = !(opts && opts.remember === false);
         const argHex = bytesToHex(argBytes);
         // A fresh sender per message, otherwise the per-(sender, nonce) replay
         // set rejects the second call from the same sender. The sender is the
@@ -934,9 +1043,9 @@
             emitProgress("The network is busy, retrying automatically.");
             await sleep(SUBMIT_WAITS_MS[attempt]);
         }
-        rememberPendingCall(method, hash);
+        if (remember) rememberPendingCall(method, hash);
         const reply = await pollReceipt(method, hash, RECEIPT_BUDGET_MS);
-        if (reply) { clearPendingCall(); return reply; }
+        if (reply) { if (remember) clearPendingCall(); return reply; }
         throw typedError("MemphisReceiptTimeout",
             "The network has not confirmed this step yet (" + method + ", " + Math.round(RECEIPT_BUDGET_MS / 1000) + " s). Nothing was lost: the request is still queued, and trying again collects its result.",
             { method, messageHash: hash });
@@ -1243,6 +1352,91 @@
         };
     }
 
+    // ─── a passkey Memphis does not hold ───────────────────────────────────
+    //
+    // A device keeps every passkey ever saved for this site, including one
+    // saved during a sign-up that never finished (the ceremony saves passkey 1
+    // before it asks for passkey 2, and registers only at the end). Sign-in
+    // asks with allowCredentials = [], so such a passkey is offered next to the
+    // real one, or alone, and `authenticate` could only answer FactorNotFound.
+    //
+    // So the passkey the device chose is looked up before it is used:
+    //   - Memphis holds it for this anchor  -> sign in as before;
+    //   - it holds it for another anchor    -> say so, nothing is written;
+    //   - it does not hold it               -> say so in plain words, and how
+    //     to delete it from the device; nothing is written.
+    //
+    // The page never asks the password manager to drop a passkey itself
+    // (WebAuthn L3 signalUnknownCredential). Chrome deletes the passkey at once
+    // and shows "This passkey was deleted from this site", and the page cannot
+    // be sure the passkey opens nothing: a registration answered with an error
+    // by one node may still have run on the chain. A passkey left on the
+    // device costs the person one extra entry in the list; a deleted one can
+    // cost them their identity's only passkey (27 October 2026).
+
+    /** Always false: the page does not drop passkeys (see above). Kept so the
+     *  callers and the plain-words messages need no second branch. */
+    async function signalUnknownCredential(_credentialId) {
+        return false;
+    }
+
+    /** Passkeys minted during a sign-up attempt that registered nothing are
+     *  left on the device (see above). Returns how many were dropped: 0. */
+    async function forgetUnregisteredPasskeys(credentialIds) {
+        let n = 0;
+        for (const id of credentialIds || []) if (id && await signalUnknownCredential(id)) n++;
+        return n;
+    }
+
+    function pendingCredential(hex) {
+        const r = loadPendingRegistration(null);
+        return !!(r && (r.credentials || []).includes(hex));
+    }
+
+    function unknownPasskeyError(name, signalled, credentialIdHex) {
+        const removed = signalled
+            ? " It has been removed from your passkey list."
+            : " You can delete it from your device's passkey list (in Chrome: passwords.google.com).";
+        const next = name
+            ? " Press Continue again and choose your other passkey for " + name + ", or create your identity again."
+            : " Choose another passkey, or create your identity again.";
+        return typedError("MemphisPasskeyNotRegistered",
+            "This passkey was saved during a sign-up that did not finish, so Memphis does not know it." + removed + next,
+            { credentialIdHex, signalled });
+    }
+
+    /**
+     * Before `authenticate`: is the passkey the device chose one Memphis holds,
+     * and (for a handle sign-in) for this identity? Throws a plain-words typed
+     * error when not. A Memphis without anchor_for_credential is not asked.
+     */
+    async function checkPresentedPasskey(credentialId, anchorBytes, name) {
+        if (!(await hasCapability("anchor_for_credential"))) return;
+        const got = await seqQuery("anchor_for_credential", encBlob(credentialId), "blob", true);
+        const hex = bytesToHex(credentialId);
+        if (got.value) {
+            if (anchorBytes && bytesToHex(got.value) !== bytesToHex(anchorBytes)) {
+                throw typedError("MemphisPasskeyOtherIdentity",
+                    "This passkey belongs to a different identity, not " + name + ". Press Continue again and choose the passkey you made for " + name + ".",
+                    { credentialIdHex: hex });
+            }
+            return;
+        }
+        const signalled = pendingCredential(hex) ? false : await signalUnknownCredential(credentialId);
+        throw unknownPasskeyError(name, signalled, hex);
+    }
+
+    /** `authenticate` refused: FactorNotFound is the chain's own word that it
+     *  does not hold this passkey, said in plain words; anything else as is. */
+    async function authenticateRefusal(err, credentialId, name) {
+        if (err.name === "FactorNotFound") {
+            const hex = bytesToHex(credentialId);
+            const signalled = pendingCredential(hex) ? false : await signalUnknownCredential(credentialId);
+            return unknownPasskeyError(name, signalled, hex);
+        }
+        return new Error("authenticate: " + err.name);
+    }
+
     // ─── High-level flows ──────────────────────────────────────────────────
     function validateName(name) {
         const n = name.trim().toLowerCase();
@@ -1373,6 +1567,9 @@
         } catch (e) {
             // Refused outright: nothing was minted, nothing to resume.
             if (e && (e.code === "MemphisCanisterError" || e.code === "MemphisNetworkBusy")) clearPendingRegistration();
+            // The canister ran it and refused: no anchor holds these passkeys,
+            // so a page may ask the password manager to drop them.
+            if (e && e.code === "MemphisCanisterError") e.registrationRefused = true;
             // Ran, reply lost: the anchor exists and holds these credentials.
             // With a canister that answers anchor_for_credential the identity
             // is recovered here with one passkey prompt; without one the
@@ -1440,6 +1637,7 @@
             e.code = regDec.err.name;
             e.errId = regDec.err.id;
             e.detail = regDec.err.message;
+            e.registrationRefused = true;
             throw e;
         }
         const session = sessionFromRegistration(validated, regDec.ok);
@@ -1547,12 +1745,32 @@
         const dec = decodeResultBlob(challengeReply);
         if (dec.err) throw new Error("begin_authentication: " + dec.err.name);
         const challenge = dec.ok;
-        // 2. navigator.credentials.get with allowCredentials = [] so the
-        //    authenticator surfaces all stored credentials matching the rp.
-        //    (We don't track credential ids client-side; the canister will
-        //    refuse if the asserted credential_id isn't bound to the anchor.)
-        const assertion = await webauthnGet(challenge, []);
-        // 3. authenticate
+        // 2. navigator.credentials.get, offering only this anchor's passkeys
+        //    when Memphis can list them (credentials_for_anchor), so a passkey
+        //    from an unfinished sign-up or another identity is never offered.
+        //    Otherwise allowCredentials = [] and the device offers every
+        //    passkey it holds for the rp; the check below then catches a
+        //    wrong one before `authenticate`.
+        const allow = await credentialsForAnchor(anchorBytes);
+        let assertion;
+        try {
+            assertion = await webauthnGet(challenge, allow);
+        } catch (e) {
+            // Offered only this identity's passkeys, a device that holds none
+            // of them has nothing to show, and the browser says only
+            // NotAllowedError (as it does for a cancelled prompt). Say what it
+            // means here, and what else opens the identity.
+            if (allow.length && e && e.name === "NotAllowedError") {
+                throw typedError("MemphisNoPasskeyHere",
+                    "This device has no passkey for " + validated + ", or the passkey prompt was cancelled. Sign in on the device where you made " +
+                    validated + ", or use \u201cSign in with your phone\u201d or \u201cSign in with your recovery phrase\u201d.",
+                    { nameRequested: validated, cause: e });
+            }
+            throw e;
+        }
+        // 3. the passkey the device chose is one Memphis holds for this anchor
+        await checkPresentedPasskey(assertion.credentialId, anchorBytes, validated);
+        // 4. authenticate
         emitProgress("The network is confirming your sign-in.");
         const authReply = await memphisCallAwait("authenticate", encFactorAssertion({
             credential_id: assertion.credentialId,
@@ -1561,7 +1779,7 @@
             signature: assertion.signature,
         }));
         const authDec = decodeResultRecordAuth(authReply);
-        if (authDec.err) throw new Error("authenticate: " + authDec.err.name);
+        if (authDec.err) throw await authenticateRefusal(authDec.err, assertion.credentialId, validated);
         const session = {
             name: validated,
             anchor_id_hex: bytesToHex(anchorBytes),
@@ -1612,6 +1830,7 @@
         const dec = decodeResultBlob(challengeReply);
         if (dec.err) throw new Error("begin_authentication_discoverable: " + (dec.err.message || dec.err.name));
         const assertion = await webauthnGet(dec.ok, []);
+        await checkPresentedPasskey(assertion.credentialId, null, null);
         emitProgress("The network is confirming your sign-in.");
         const authReply = await memphisCallAwait("authenticate", encFactorAssertion({
             credential_id: assertion.credentialId,
@@ -1620,7 +1839,7 @@
             signature: assertion.signature,
         }));
         const authDec = decodeResultRecordAuth(authReply);
-        if (authDec.err) throw new Error("authenticate: " + authDec.err.name);
+        if (authDec.err) throw await authenticateRefusal(authDec.err, assertion.credentialId, null);
         // The anchor and the handle are old writes: no staleness to guard.
         const anchor = await seqQuery("anchor_for_credential", encBlob(assertion.credentialId), "blob", true);
         if (!anchor.value) throw new Error("anchor_for_credential: the credential that just signed in is unknown");
@@ -1905,11 +2124,24 @@
         const R = requireRecoveryModule();
         const validated = validateName(name);
         if (!(await R.validatePhrase(phrase))) {
-            throw new Error("that is not a valid recovery phrase, check the words and their order");
+            throw typedError("MemphisPhraseInvalid", "Those are not twelve recovery-phrase words in a valid order. Check each word and its spelling.");
         }
         const anchorBytes = await lookupAnchor(validated);
-        if (!anchorBytes) throw new Error("no Memphis identity for " + validated);
+        if (!anchorBytes) throw typedError("NameNotRegistered", "There is no Memphis identity called " + validated + ". Check the handle.", { nameRequested: validated });
         const identity = await R.deriveIdentity(phrase);
+        // The phrase names its own identity: one Memphis does not hold, or holds
+        // for someone else, is said in plain words before anything is written.
+        if (await hasCapability("anchor_for_credential")) {
+            const owner = (await seqQuery("anchor_for_credential", encBlob(identity.credentialId), "blob", true)).value;
+            if (!owner) {
+                throw typedError("MemphisPhraseNotRegistered",
+                    "These words are not the recovery phrase of " + validated + ". Check each word and its order; the phrase is the one shown when the identity was created.");
+            }
+            if (bytesToHex(owner) !== bytesToHex(anchorBytes)) {
+                throw typedError("MemphisPhraseOtherIdentity",
+                    "This recovery phrase belongs to a different identity, not " + validated + ". Check the handle.");
+            }
+        }
         const challengeReply = await memphisCallAwait("begin_authentication", encBlob(anchorBytes));
         const dec = decodeResultBlob(challengeReply);
         if (dec.err) throw new Error("begin_authentication: " + (dec.err.message || dec.err.name));
@@ -1923,9 +2155,9 @@
         const authDec = decodeResultRecordAuth(authReply);
         if (authDec.err) {
             const n = authDec.err.name;
-            throw new Error(n === "FactorNotFound"
-                ? "this phrase is not registered as a recovery factor for " + validated
-                : "authenticate: " + (authDec.err.message || n));
+            throw n === "FactorNotFound"
+                ? typedError("MemphisPhraseNotRegistered", "These words are not the recovery phrase of " + validated + ". Check each word and its order.")
+                : new Error("authenticate: " + (authDec.err.message || n));
         }
         const session = {
             name: validated,
@@ -1984,7 +2216,7 @@
         return true;
     }
 
-    // ── multi-factor registration (MIN_FACTORS_AT_SIGNUP = 3) ──────────────
+    // ── multi-factor registration (three factors, or two with signup_two_factors)
     //
     // The granular pieces let the UI orchestrate a 3-factor signup ceremony
     // (device passkey + second passkey + recovery phrase) over ONE
@@ -2251,7 +2483,141 @@
         };
     }
 
+    // ─── sign a computer in from a phone (device link) ─────────────────────
+    //
+    // A computer that holds no passkey (no Windows Hello, no Bluetooth for the
+    // hybrid QR) is approved by a phone that does: the RFC 8628 device grant,
+    // the shape WhatsApp and Signal use for linked devices.
+    //   computer: beginDeviceLink(origin) -> QR of the link + a six-symbol code;
+    //             it keeps a 32-byte secret and sent Memphis only its hash.
+    //   phone:    approveDeviceLink(link, code): the person types the code off
+    //             the computer and approves with a passkey over this link's own
+    //             challenge.
+    //   computer: claimDeviceLink(link) with the secret -> an access token and a
+    //             refresh chain for `origin` only, never a master session.
+    // Whoever photographs the QR has the link id, not the secret, so cannot
+    // claim it. Needs a Memphis that lists `device_link`.
+    const LINK_SECRET_DOMAIN = utf8.encode("MEMPHIS-DEVICE-LINK-SECRET-V1");
+    const LINK_CODE_ALPHABET = "ACDEFGHJKMNPQRTUVWXY34679";
+    const LINK_CALL = { remember: false };
+
+    function linkError(err, credentialId) {
+        const n = err.name, m = err.message || "";
+        if (n === "ChallengeExpired") return typedError("MemphisLinkExpired", "This sign-in request has ended. The computer shows a new code by itself: scan that one.");
+        if (n === "SessionExpired") return typedError("MemphisLinkSignedOut", "The identity was signed out everywhere after the phone approved, so this sign-in was cancelled. Scan the new code to sign in again.");
+        if (/does not match/.test(m)) return typedError("MemphisLinkWrongCode", "That code does not match the one on the computer. Check it and type it again.");
+        if (/too many wrong codes/.test(m)) return typedError("MemphisLinkClosed", "Too many wrong codes, so this request was closed. Start again on the computer.");
+        if (/already approved/.test(m)) return typedError("MemphisLinkApproved", "This request has already been approved.");
+        if (/different request/.test(m)) return typedError("MemphisLinkMismatch", "The passkey answered a different request. Scan the code on the computer again.");
+        return typedError("MemphisLinkRefused", "Memphis refused this step: " + (m || n) + ".", { detail: n, credentialIdHex: credentialId ? bytesToHex(credentialId) : null });
+    }
+
+    /** What a person typed, as Memphis compares it: letters and digits only,
+     *  upper case ("k7q-4mx" -> "K7Q4MX"). */
+    function normaliseLinkCode(raw) {
+        return String(raw || "").replace(/[^0-9a-z]/gi, "").toUpperCase();
+    }
+
+    /** On the computer: open a request for `origin`. The returned object holds
+     *  the secret; keep it in memory only, and pass it to claimDeviceLink. */
+    async function beginDeviceLink(origin) {
+        if (!(await hasCapability("device_link"))) throw typedError("MemphisNotSupported", "This Memphis does not offer sign-in from a phone yet.");
+        if (!origin) throw new Error("beginDeviceLink: an origin is required");
+        const secret = randomBytes(32);
+        const secretHash = await sha256b(concat(LINK_SECRET_DOMAIN, secret));
+        const reply = await memphisCallAwait("begin_device_link", encBlobTextArgs(secretHash, origin), LINK_CALL);
+        const dec = decodeResultRecordAny(reply, [["link_id", "blob"], ["code", "text"], ["expires_at_ns", "nat64"]]);
+        if (dec.err) throw linkError(dec.err);
+        return { link_id_hex: bytesToHex(dec.ok.link_id), code: dec.ok.code, origin, secret };
+    }
+
+    /** The request as Memphis holds it: { origin, approved, approve_challenge },
+     *  or null when it is unknown or has ended. Never carries the code. */
+    async function deviceLinkInfo(linkIdHex) {
+        const rec = decodeOptRecord(await memphisQuery("device_link_info", encBlob(hexToBytes(linkIdHex))), [
+            ["origin", "text"], ["expires_at_ns", "nat64"], ["approved", "bool"], ["approve_challenge", "blob"],
+        ]);
+        return rec ? { origin: rec.origin, approved: rec.approved, approve_challenge: rec.approve_challenge } : null;
+    }
+
+    /** On the computer: collect the sign-in. null = not approved yet (keep
+     *  polling). One shot: a successful claim ends the link. */
+    async function claimDeviceLink(link) {
+        const reply = await memphisCallAwait("claim_device_link", encTwoBlobs(hexToBytes(link.link_id_hex), link.secret), LINK_CALL);
+        const dec = decodeResultRecordAny(reply, [
+            ["session_token", "blob"], ["expires_at_ns", "nat64"],
+            ["refresh_token", "blob"], ["refresh_expires_at_ns", "nat64"], ["refresh_absolute_expires_at_ns", "nat64"],
+            ["anchor_id", "blob"], ["name", "opttext"],
+        ]);
+        if (dec.err) {
+            if (dec.err.name === "NotAuthenticated") return null;
+            throw linkError(dec.err);
+        }
+        const r = dec.ok;
+        return {
+            name: r.name,
+            anchor_id_hex: bytesToHex(r.anchor_id),
+            origin: link.origin,
+            scoped_token_hex: bytesToHex(r.session_token),
+            expires_at_ns: r.expires_at_ns.toString(),
+            refresh_token_hex: bytesToHex(r.refresh_token),
+            refresh_expires_at_ns: r.refresh_expires_at_ns.toString(),
+            refresh_absolute_expires_at_ns: r.refresh_absolute_expires_at_ns.toString(),
+        };
+    }
+
+    /** On the phone: approve the computer's request with the code read off its
+     *  screen and a passkey on this phone. Returns { origin, name }. */
+    async function approveDeviceLink(linkIdHex, rawCode) {
+        const code = normaliseLinkCode(rawCode);
+        if (code.length !== 6 || [...code].some(c => !LINK_CODE_ALPHABET.includes(c))) {
+            throw typedError("MemphisLinkWrongCode", "The code is six letters and digits, as shown on the computer. Check it and type it again.");
+        }
+        // The phone may ask a node that has not yet seen the request the
+        // computer opened a moment ago: a miss is asked again before it is
+        // believed.
+        let info = await deviceLinkInfo(linkIdHex);
+        for (const wait of SEQ_RETRY_WAITS_MS) {
+            if (info) break;
+            await sleep(wait);
+            info = await deviceLinkInfo(linkIdHex);
+        }
+        if (!info) throw linkError({ name: "ChallengeExpired" });
+        if (info.approved) throw linkError({ name: "InvalidArgument", message: "already approved" });
+        const assertion = await webauthnGet(info.approve_challenge, []);
+        await checkPresentedPasskey(assertion.credentialId, null, null);
+        emitProgress("The network is confirming your approval.");
+        const reply = await memphisCallAwait("approve_device_link", encLinkApprovalArgs(hexToBytes(linkIdHex), code, {
+            credential_id: assertion.credentialId,
+            authenticator_data: assertion.authenticatorData,
+            client_data_json: assertion.clientDataJSON,
+            signature: assertion.signature,
+        }), LINK_CALL);
+        const dec = decodeResultRecordAny(reply, [["origin", "text"], ["name", "opttext"]]);
+        if (dec.err) {
+            if (dec.err.name === "FactorNotFound") throw await authenticateRefusal(dec.err, assertion.credentialId, null);
+            throw linkError(dec.err, assertion.credentialId);
+        }
+        return { origin: dec.ok.origin, name: dec.ok.name };
+    }
+
+    /** The passkey ids of an anchor, for allowCredentials in a handle sign-in,
+     *  so the device offers only this identity's passkeys. [] when Memphis
+     *  cannot say (an older build, or the read failed): the device then offers
+     *  every passkey it holds, as before. */
+    async function credentialsForAnchor(anchorBytes) {
+        try {
+            if (!(await hasCapability("credentials_for_anchor"))) return [];
+            return decodeVecBlob(await memphisQuery("credentials_for_anchor", encBlob(anchorBytes)));
+        } catch (_) { return []; }
+    }
+
     global.MemphisPasskey = {
+        // Sign a computer in from a phone (canister capability "device_link").
+        beginDeviceLink,
+        deviceLinkInfo,
+        claimDeviceLink,
+        approveDeviceLink,
         issueRefresh,
         exchangeRefresh,
         issueScopedSession,
@@ -2279,6 +2645,8 @@
         buildDeviceFactor,
         buildRecoveryFactor,
         registerWithFactors,
+        // A sign-up attempt that registered nothing: drop the passkeys it saved.
+        forgetUnregisteredPasskeys,
         // A registration this browser did not confirm: finish it, or ask.
         resumePendingRegistration,
         pendingRegistration,

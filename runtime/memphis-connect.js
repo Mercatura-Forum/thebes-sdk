@@ -343,17 +343,14 @@
     return new Promise(function (resolve, reject) {
       var done = false;
 
-      // keepOpen: on a failure the popup stays where it is, showing the reason
-      // in the person's own words; closing it at once left them with an error
-      // that flashed and vanished, and nothing to report.
-      function finish(fn, arg, keepOpen) {
+      function finish(fn, arg) {
         if (done) return;
         done = true;
         global.removeEventListener("message", onMessage);
         clearInterval(poll);
         clearTimeout(timer);
         clearTimeout(ceiling);
-        if (!keepOpen) { try { if (win && !win.closed) win.close(); } catch (_) {} }
+        try { if (win && !win.closed) win.close(); } catch (_) {}
         fn(arg);
       }
 
@@ -387,25 +384,40 @@
           var who = sessionFrom(app, d);
           persist(app, who);
           finish(resolve, who);
+        } else if (d.reason === "closed") {
+          // The window was closed. After a failure, the failure is the answer:
+          // the person read it and gave up, and the app should say why.
+          finish(reject, lastFailure || cancelledError());
         } else {
-          var err = new Error(d.reason === "closed"
-            ? "Sign-in was cancelled."
-            : (d.reason || "Sign-in did not complete."));
-          err.code = d.reason === "closed" ? "CANCELLED" : "FAILED";
+          // A failure the connect window shows in the person's own words, with
+          // Continue still there. Settling now and closing the window made the
+          // error flash and vanish; settling now and leaving it open meant a
+          // second try in that window signed the person in and nobody heard.
+          // So keep listening: the next answer from the window settles this
+          // call, and the failure is reported only if the window is closed or
+          // the ceiling passes. The window is idle meanwhile, so silence is not
+          // timed, and a retry's heartbeats re-arm the silence clock.
+          var err = new Error(d.reason || "Sign-in did not complete.");
+          err.code = "FAILED";
           try { console.error("[memphis-connect] sign-in failed:", err.code, d.reason); } catch (_) {}
-          finish(reject, err, err.code === "FAILED");
+          lastFailure = err;
+          clearTimeout(timer);
+          if (typeof opts.onProgress === "function") { try { opts.onProgress(err.message); } catch (_) {} }
         }
       }
+
+      function cancelledError() {
+        var cancelled = new Error("Sign-in was cancelled.");
+        cancelled.code = "CANCELLED";
+        return cancelled;
+      }
+      var lastFailure = null;
 
       global.addEventListener("message", onMessage);
 
       // A user can close the window without it telling us, so poll for it.
       var poll = setInterval(function () {
-        if (win.closed) {
-          var cancelled = new Error("Sign-in was cancelled.");
-          cancelled.code = "CANCELLED";
-          finish(reject, cancelled);
-        }
+        if (win.closed) finish(reject, lastFailure || cancelledError());
       }, 400);
 
       var timer = null;
@@ -413,7 +425,7 @@
       var ceiling = setTimeout(function () {
         var timedOut = new Error("Sign-in timed out.");
         timedOut.code = "TIMEOUT";
-        finish(reject, timedOut);
+        finish(reject, lastFailure || timedOut);
       }, maxMs);
     });
   }

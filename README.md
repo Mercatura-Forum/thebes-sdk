@@ -16,9 +16,12 @@ are written against. TypeScript and plain JavaScript. Apache 2.0.
   the Memphis origin; `memphis-connect.js` opens that ceremony from an app on
   its own domain and hands back a token minted for that origin only. The list
   of credential algorithms offered is read from the identity contract itself.
-- **Three factors at signup.** A device passkey, a second passkey and a
-  recovery phrase, driven over one registration challenge; a lost device is not
-  a lost identity.
+- **Two factors at signup.** A passkey on the device and a recovery phrase,
+  driven over one registration challenge; another device is added later, and a
+  lost device is not a lost identity.
+- **Sign in a computer from a phone.** The computer shows a QR code and a
+  six-symbol code; the phone approves with one of its passkeys, and the computer
+  receives a session bound to the application's origin.
 - **Sessions that renew.** A refresh credential renews an access token
   silently, and a session survives a page reload; the same session module is
   used with React, without React, or from a script tag.
@@ -79,7 +82,7 @@ and `motoko/thebes-lib`) so that it builds self-contained; this repository and
 | --- | --- |
 | `runtime/boundary.js` | The browser boundary client (`window.EgyptBoundary`): Candid encode and decode, a persisted browser identity (one Ed25519 key per browser, kept in IndexedDB) that signs every update, call submission and receipt polling. `identity()` is the principal a contract sees as `msg.caller`; on a first visit await `ready()` before reading it. |
 | `runtime/noble-ed25519-3.1.0.js` | The unmodified `@noble/ed25519` 3.1.0 file (MIT). `boundary.js` and `passkey.js` load it from beside themselves only in a browser without WebCrypto Ed25519. Ship it next to them. |
-| `runtime/passkey.js` | The Memphis passkey client (`window.MemphisPasskey`): the WebAuthn ceremony, the three-factor signup, sessions. Runs on the Memphis origin only (see Identity). |
+| `runtime/passkey.js` | The Memphis passkey client (`window.MemphisPasskey`): the WebAuthn ceremony, signup with a passkey and a recovery phrase, sign-in from a phone (device link), sessions. Runs on the Memphis origin only (see Identity). |
 | `runtime/recovery.js` | The recovery-phrase factor: a BIP39 phrase whose derived key registers as a factor and signs in like a passkey. Loaded alongside `passkey.js`. |
 | `runtime/memphis-connect.js` | `window.memphis.connect()`: sign-in for an application served from its own domain, as a popup or a full-page redirect. |
 | `src/thebes.ts` | The typed wrapper over the boundary client: `query`, `update`, media upload, decoders. Framework-agnostic. |

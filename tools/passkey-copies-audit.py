@@ -33,7 +33,7 @@ RETIRED = {
         (re.compile(r"sender: senderHex, nonce: 0 \}\)"), "unsigned call naming a sender: refused once the signed-sender gate is active (before the signed transport)"),
     ],
     "memphis-connect.js": [
-        (re.compile(r"function finish\(fn, arg\)\s*\{"), "popup closed on failure (pre Sep 14 keep-open fix)"),
+        (re.compile(r"finish\(reject, err\);"), "popup closed on failure (pre Sep 14 keep-open fix)"),
         (re.compile(r"var timeoutMs = opts\.timeoutMs \|\| 120000;\s*\n\s*\n\s*// ── The popup"), "single timeout on the whole sign-in, no heartbeat (pre Sep 15 silence-timeout fix)"),
     ],
 }
