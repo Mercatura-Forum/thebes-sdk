@@ -21,6 +21,11 @@ type Boundary = {
   principalOf: (publicKey: string | Uint8Array) => string
   isPersistentIdentity: () => boolean
   signCall: (cid: number | string, method: string, argHex: string) => Promise<{ sender: string; nonce: number; signature: string }>
+  /** The signed fields of one /api/query body, by this browser's key. A node answers a query that names a sender as
+   *  that sender only with these; without them, as anonymous. `expiry` is nanoseconds since the epoch, as a decimal
+   *  string (it does not fit a JavaScript number). */
+  signQuery: (cid: number | string, method: string, argHex?: string) => Promise<{ sender: string; expiry: string; signature: string }>
+  querySigningPayload: (cid: number, method: string, arg: Uint8Array, sender: Uint8Array, expiryNs: bigint) => Uint8Array
   encodeArg: (v: unknown) => Uint8Array
   encodeArgs: (vs: unknown[]) => Uint8Array
   bytesToHex: (b: Uint8Array) => string
