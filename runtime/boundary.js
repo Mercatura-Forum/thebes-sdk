@@ -50,6 +50,17 @@
       lenPrefixed(utf8.encode(method)), lenPrefixed(argBytes), lenPrefixed(senderBytes), u64be(nonce));
   }
 
+  // egypt-state query_auth.rs query_signing_payload (INV-QUERY-SENDER): a query that names a sender proves it. Its
+  // domain tag is length-prefixed (the payload starts 00 00 00 0f), so a query signature can never pass as a call's,
+  // whose payload starts with "egypt-l1-ingress-v1"; an expiry (nanoseconds since the epoch) replaces the nonce.
+  const QUERY_DOMAIN = utf8.encode("THEBES-QUERY-v1");
+  // Two minutes ahead: inside the node's five-minute window, with room for this machine's clock to be off.
+  const QUERY_EXPIRY_MS = 120000;
+  function querySigningPayload(canisterId, method, argBytes, senderBytes, expiryNs) {
+    return concatBytes(lenPrefixed(QUERY_DOMAIN), u64be(canisterId), lenPrefixed(utf8.encode(method)),
+      lenPrefixed(argBytes), lenPrefixed(senderBytes), u64be(expiryNs));
+  }
+
   // SHA-224 (FIPS 180-4 §6.3): SHA-256 with its own initial value, truncated to
   // 28 bytes. WebCrypto has no SHA-224 and `identity()` must be synchronous.
   const SHA256_K = new Uint32Array([
@@ -261,6 +272,13 @@
     try { localStorage.setItem(NONCE_KEY, String(nonce)); } catch (_) { /* no storage */ }
     return nonce;
   }
+  async function signQuery(canisterId, method, argHex) {
+    await ready();
+    const arg = null == argHex ? "4449444c0000" : argHex;
+    const expiry = BigInt(Date.now() + QUERY_EXPIRY_MS) * 1000000n;
+    const signature = await signPayload(querySigningPayload(Number(canisterId), method, d(arg), keyRecord.publicKey, expiry));
+    return { sender: cached.publicKey, expiry: expiry.toString(), signature: h(signature) };
+  }
   // A nonce refused as already used never executed, so the call is re-signed
   // with a new nonce (two tabs of one browser can race on the same key).
   const NONCE_REPLAY = /^replay: nonce \d+ already used/;
@@ -312,17 +330,27 @@
         return receipt;
       }
     },
-    // Queries are not signed (the chain does not check a query's caller, V151):
-    // they name this browser's key so a canister's caller-scoped reads match
-    // its updates.
+    querySigningPayload,
+    // The signed fields of one /api/query body ({ sender, expiry, signature }), by this browser's key. A node answers a
+    // query that names a sender as that sender only with these; without them it answers as anonymous (INV-QUERY-SENDER,
+    // once the node enforces it). The expiry is a decimal string: nanoseconds do not fit a JavaScript number.
+    signQuery,
+    // A query names this browser's key, signed, so a canister's caller-scoped reads see the same caller as its updates.
+    // Naming another sender sends it unsigned: the node then answers as anonymous (it never refuses the query).
     callQuery: async function (canisterId, method, argHex, opts) {
       opts = opts || {};
-      let sender = opts.sender;
-      if (sender == null) { await ready(); sender = cached.publicKey; }
+      const arg = null == argHex ? m : argHex;
+      await ready();
+      let fields;
+      if (opts.sender == null || opts.sender === cached.publicKey) {
+        fields = await signQuery(canisterId, method, arg);
+      } else {
+        fields = { sender: opts.sender };
+      }
       return await fetch(e + "/api/query", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ canister_id: Number(canisterId), method, arg: null == argHex ? m : argHex, sender }),
+        body: JSON.stringify({ canister_id: Number(canisterId), method, arg, ...fields }),
       }).then((res) => res.json()).catch(() => ({}));
     },
   };

@@ -10,7 +10,8 @@ are written against. TypeScript and plain JavaScript. Apache 2.0.
 
 - **One boundary client.** `runtime/boundary.js` encodes and decodes Candid by
   hand, keeps a persisted browser identity, submits calls and polls receipts
-  against the cluster API. Calls are signed by the browser's own Ed25519 key.
+  against the cluster API. Calls are signed by the browser's own Ed25519 key, and so are queries: a node
+  answers a query that names a sender as that sender only when the sender signed it.
   No generated bindings, no bundler required.
 - **Passkey identity on any domain.** `passkey.js` runs the WebAuthn ceremony on
   the Memphis origin; `memphis-connect.js` opens that ceremony from an app on
@@ -80,7 +81,7 @@ and `motoko/thebes-lib`) so that it builds self-contained; this repository and
 
 | Path | What it is |
 | --- | --- |
-| `runtime/boundary.js` | The browser boundary client (`window.EgyptBoundary`): Candid encode and decode, a persisted browser identity (one Ed25519 key per browser, kept in IndexedDB) that signs every update, call submission and receipt polling. `identity()` is the principal a contract sees as `msg.caller`; on a first visit await `ready()` before reading it. |
+| `runtime/boundary.js` | The browser boundary client (`window.EgyptBoundary`): Candid encode and decode, a persisted browser identity (one Ed25519 key per browser, kept in IndexedDB) that signs every update and every query (`signCall`, `signQuery` for a client with its own transport), call submission and receipt polling. `identity()` is the principal a contract sees as `msg.caller`; on a first visit await `ready()` before reading it. |
 | `runtime/noble-ed25519-3.1.0.js` | The unmodified `@noble/ed25519` 3.1.0 file (MIT). `boundary.js` and `passkey.js` load it from beside themselves only in a browser without WebCrypto Ed25519. Ship it next to them. |
 | `runtime/passkey.js` | The Memphis passkey client (`window.MemphisPasskey`): the WebAuthn ceremony, signup with a passkey and a recovery phrase, sign-in from a phone (device link), sessions. Runs on the Memphis origin only (see Identity). |
 | `runtime/recovery.js` | The recovery-phrase factor: a BIP39 phrase whose derived key registers as a factor and signs in like a passkey. Loaded alongside `passkey.js`. |

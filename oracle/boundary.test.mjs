@@ -249,12 +249,45 @@ function chain(opts = {}) {
   check("5d RED: signCall's signature does not cover another method", !verifies({ ...body(f1), method: "other" }), "");
 }
 
-// 6. Queries name this browser's key, so caller-scoped reads match its updates.
+// 6. Queries name this browser's key, signed (INV-QUERY-SENDER), so caller-scoped reads match its updates. The query
+//    payload is built here from egypt-state query_auth.rs, not from the runtime.
+function queryPayload(cid, method, argBytes, sender, expiry) {
+  const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+  const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
+  const lp = (b) => Buffer.concat([u32(b.length), Buffer.from(b)]);
+  return Buffer.concat([lp(Buffer.from("THEBES-QUERY-v1")), u64(cid), lp(Buffer.from(method)), lp(argBytes), lp(sender), u64(expiry)]);
+}
+function queryVerifies(body) {
+  const pub = unhex(body.sender);
+  if (pub.length !== 32 || !body.signature || body.signature.length !== 128 || typeof body.expiry !== "string") return false;
+  const key = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(pub)]), format: "der", type: "spki" });
+  return edVerify(null, queryPayload(body.canister_id, body.method, unhex(body.arg), pub, body.expiry), key, Buffer.from(body.signature, "hex"));
+}
+{
+  // The cross-language vector egypt-state's query_auth.rs test checks too.
+  const { b } = page(chain().script);
+  const v = b.querySigningPayload(7600001, "read", unhex("4449444c0000"), unhex("ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"), 1800000000060000000n);
+  check("6 querySigningPayload equals the node's bytes (the shared vector)", hex(v) ===
+    "0000000f5448454245532d51554552592d7631000000000073f7810000000472656164000000064449444c000000000020" +
+    "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c18fae27697478700", hex(v));
+}
 {
   const c = chain();
   const { b } = page(c.script);
+  const t0 = Date.now();
   await b.callQuery(7001, "mine");
-  check("6 a query names the browser key as sender", c.queries.length === 1 && c.queries[0].sender === b.publicKey(), JSON.stringify(c.queries[0]));
+  const q = c.queries[0] || {};
+  const exp = BigInt(q.expiry || 0), lo = BigInt(t0) * 1000000n, hi = BigInt(Date.now() + 300000) * 1000000n;
+  check("6b a query names the browser key, signed, and verifies", c.queries.length === 1 && q.sender === b.publicKey() && queryVerifies(q), JSON.stringify(q));
+  check("6c its expiry is a decimal string inside the node's five-minute window", exp > lo && exp <= hi, q.expiry);
+  check("6d RED: the signature does not cover another method", !queryVerifies({ ...q, method: "other" }), "");
+  const f = await b.signCall(7001, "mine", "4449444c0000");
+  check("6e RED: a call signature does not pass as a query's", !queryVerifies({ canister_id: 7001, method: "mine", arg: "4449444c0000", sender: f.sender, expiry: q.expiry, signature: f.signature }), "");
+  const s = await b.signQuery(7001, "mine");
+  check("6f signQuery returns the fields of a verifying query", queryVerifies({ canister_id: 7001, method: "mine", arg: "4449444c0000", ...s }), JSON.stringify(s));
+  await b.callQuery(7001, "mine", null, { sender: "6e3e7813828df2c7fc7db1ec56d18db5fc84e2de19fbd40579112cd502" });
+  const foreign = c.queries[1] || {};
+  check("6g a foreign sender is sent unsigned (the node then answers as anonymous)", foreign.sender === "6e3e7813828df2c7fc7db1ec56d18db5fc84e2de19fbd40579112cd502" && !foreign.signature && !foreign.expiry, JSON.stringify(foreign));
 }
 
 // 7. Without WebCrypto Ed25519 the noble file beside boundary.js makes, keeps and signs with the key.
